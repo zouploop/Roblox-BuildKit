@@ -197,7 +197,7 @@ screenGui.ResetOnSpawn = true   -- re-create on respawn (respawn timer) — defa
 
 These skills pair with the **roblox-buildkit** MCP server in this repo — the steerable-camera + parametric-build toolkit for Roblox Studio. When a task is visual or geometric, prefer its tools over guessing coordinates:
 
-- **See / verify:** `rbx_capture`, `rbx_frame`, `rbx_orbit`, `rbx_montage`, `rbx_floor_plan`, `rbx_isolate`
+- **See / verify:** `rbx_capture`, `rbx_frame`, `rbx_orbit`, `rbx_floor_plan`, `rbx_isolate`
 - **Build / edit:** `rbx_build`, `rbx_edit`, `rbx_batch`, `rbx_insert`, `rbx_gen_mesh`, `rbx_gui`, `rbx_gui_preview`
 - **Inspect / QA:** `rbx_inspect`, `rbx_measure`, `rbx_qa`, `rbx_set_lighting`, `rbx_run`, `rbx_runtime`
 
