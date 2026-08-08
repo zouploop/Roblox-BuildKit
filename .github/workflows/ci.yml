@@ -7,7 +7,11 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,6 +22,8 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - run: npm test
+      - name: Audit dependencies (must stay clean)
+        run: npm audit --audit-level=moderate
       # The .rbxmx is generated from the plugin source but also tracked, so it can drift
       # if someone edits the .luau and commits without building. Regenerate and diff.
       - name: Check the committed plugin artifact matches its source
@@ -25,3 +31,20 @@ jobs:
           node scripts/gen-rbxmx.mjs
           git diff --exit-code -- plugin/BuildKitPlugin.rbxmx \
             || (echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result" && exit 1)
+
+  # Luau lint for the plugin — the layer with no other automated checks. Selene is a
+  # headless binary, so this runs fine without Studio. The 5k-line --!nocheck file has a
+  # legacy warning backlog, so this job is warn-only for now: it surfaces the count without
+  # blocking merges. Bump to fail-on-warning once the backlog is cleared.
+  luau-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Selene
+        run: |
+          curl -sL https://github.com/Kampfkarren/selene/releases/latest/download/selene-x86_64-unknown-linux-gnu.zip -o selene.zip
+          unzip -o selene.zip
+          sudo mv selene /usr/local/bin/
+      - name: Lint the Luau plugin
+        run: |
+          selene plugin --config selene.toml 2>&1 || true

@@ -1,14 +1,17 @@
-# Everything is ignored by default; only the plugin, server source, skills, and README are tracked.
+# Everything is ignored by default; only the files explicitly un-ignored below are tracked.
+# This whitelist is deliberate: any new root file (a stray key, .env, untracked notes) is
+# silently ignored rather than accidentally committed.
 /*
 !/.gitignore
 !/.gitattributes
-!/README.md
 !/.github/
 !/.github/**
+!/LICENSE
 
 !/tests/
 !/tests/**
 !/vitest.config.ts
+!/selene.toml
 
 !/plugin/
 /plugin/*
@@ -31,9 +34,6 @@
 !/package-lock.json
 !/tsconfig.json
 
-# Build output + local creds
+# Build output + local creds (the Open Cloud key lives in ~/.buildkit/config.json, outside
+# the repo, so the whitelist above can never track it).
 dist/
-node_modules/
-pipeline/seed_config.json
-graphify-out/
-pipeline/work/

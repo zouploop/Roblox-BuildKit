@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "MCP server that gives Claude a steerable camera, cutaway/floor-plan capture, and parametric build primitives for Roblox Studio (paired with BuildKitPlugin).",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "roblox-buildkit-mcp": "dist/index.js"
@@ -14,12 +15,19 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.0"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.5",
+    "hono": "^4.13.0",
+    "ip-address": "^10.3.0",
+    "fast-uri": "^3.1.5",
+    "body-parser": "^2.2.3"
   }
 }

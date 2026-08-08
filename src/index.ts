@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // roblox-buildkit MCP server.
 // Pairs with BuildKitPlugin (Luau) running in Studio: this process queues
 // commands the plugin executes in the Edit datamodel, and screenshots the
@@ -19,6 +20,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CAPTURE_PS1 = path.resolve(__dirname, "..", "scripts", "capture.ps1");
 const PORT = Number(process.env.BUILDKIT_PORT || 44760);
 
+// Single source of truth for the version: package.json. Read at startup so a version
+// bump is one edit instead of two (previously hardcoded here AND in package.json).
+const SERVER_VERSION = (await readFile(path.resolve(__dirname, "..", "package.json"), "utf8"))
+  .match(/"version":\s*"([^"]+)"/)?.[1] ?? "0.0.0";
+
 const bridge = new Bridge();
 
 function imageResult(base64: string, note?: string) {
@@ -35,7 +41,22 @@ function errResult(e: unknown) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-const server = new McpServer({ name: "roblox-buildkit", version: "0.1.0" });
+// Short timeout for scene-teardown calls. The plugin was already proven alive at
+// save_camera, so on the failure path (plugin died mid-capture) a full 30s wait per
+// restore would turn one failed capture into a multi-minute hang. Run them in parallel
+// with a short deadline: an already-failed call gets faster, not slower.
+const TEARDOWN_MS = 5_000;
+async function teardown(ops: ({ action: string; args?: any } | null)[]) {
+  await Promise.allSettled(
+    ops.filter((x): x is { action: string; args?: any } => !!x).map((op) => bridge.sendCommand(op.action, op.args, TEARDOWN_MS).catch(() => {}))
+  );
+}
+// Frame calls inside a per-shot loop (orbit/watch): the plugin is proven alive at setup,
+// so a frame that stalls is a dead plugin — fail each shot fast instead of eating the
+// default 30s for every one of up to 24 shots.
+const FRAME_MS = 12_000;
+
+const server = new McpServer({ name: "roblox-buildkit", version: SERVER_VERSION });
 
 const VIEWS = ["front", "back", "left", "right", "iso", "top"] as const;
 
@@ -69,7 +90,12 @@ server.registerTool(
     let saved: any = null;
     try {
       if (a.cutawayY !== undefined || a.cutaway === "roof") {
-        const cut = await bridge.sendCommand("cutaway", { target: a.target, y: a.cutawayY });
+        // Explicit mode so the plugin knows what "roof" means instead of guessing from a
+        // missing `y`: mode="y" hides above a world height, mode="roof" hides the model's
+        // top slice. (Previously only `y` was sent, so 'roof' silently fell back to the
+        // plugin's generic default.)
+        const cutArgs = a.cutaway === "roof" ? { target: a.target, mode: "roof" } : { target: a.target, mode: "y", y: a.cutawayY };
+        const cut = await bridge.sendCommand("cutaway", cutArgs);
         token = cut?.token ?? null;
       }
       if (a.isolate && a.target) {
@@ -90,11 +116,13 @@ server.registerTool(
     } catch (e) {
       return errResult(e);
     } finally {
-      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
-      if (token) await bridge.sendCommand("restore", { token }).catch(() => {});
-      if (isoToken) await bridge.sendCommand("restore", { token: isoToken }).catch(() => {});
-      if (a.annotate && a.target) await bridge.sendCommand("annotate", { mode: "off" }).catch(() => {});
-      if (a.contrast && a.target) await bridge.sendCommand("contrast", { mode: "off" }).catch(() => {});
+      await teardown([
+        saved ? { action: "restore_camera", args: saved } : null,
+        token ? { action: "restore", args: { token } } : null,
+        isoToken ? { action: "restore", args: { token: isoToken } } : null,
+        a.annotate && a.target ? { action: "annotate", args: { mode: "off" } } : null,
+        a.contrast && a.target ? { action: "contrast", args: { mode: "off" } } : null,
+      ]);
     }
   }
 );
@@ -120,7 +148,7 @@ server.registerTool(
     let cut: any = null;
     let saved: any = null;
     try {
-      cut = await bridge.sendCommand("cutaway", { target: a.target, y: a.ceilingY });
+      cut = await bridge.sendCommand("cutaway", { target: a.target, mode: "y", y: a.ceilingY });
       saved = await bridge.sendCommand("save_camera").catch(() => null);
       // Only frame (which forces CameraType=Scriptable) if save_camera succeeded — else the
       // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays
@@ -137,16 +165,16 @@ server.registerTool(
     } catch (e) {
       return errResult(e);
     } finally {
-      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
-      if (cut?.token) await bridge.sendCommand("restore", { token: cut.token }).catch(() => {});
+      await teardown([
+        saved ? { action: "restore_camera", args: saved } : null,
+        cut?.token ? { action: "restore", args: { token: cut.token } } : null,
+      ]);
     }
   }
 );
 
-// rbx_montage (fixed front/back/left/right/top+iso contact sheet) lived here. It was
-// subsumed by rbx_orbit, which does the same job with arbitrary angles — rbx_orbit(n:4,
-// top:true) is the same six views — while also labelling each frame. Two tools for one
-// capability cost manifest tokens on every turn and made the choice between them noise.
+// rbx_montage (fixed six-view contact sheet) was removed — subsumed by rbx_orbit, which
+// does the same job with arbitrary angles while labelling each frame.
 
 // --- orbit: turntable contact sheet (pseudo-3D) ------------------------------
 server.registerTool(
@@ -155,7 +183,7 @@ server.registerTool(
     title: "Orbit turntable (N angles, one call)",
     description:
       "N evenly-spaced views orbiting a target at a fixed elevation (+ optional top/bottom), each frame LABELED with its azimuth/elevation, as ONE contact sheet — even spacing plus labels let the views fuse into a single volume. " +
-      "Use it to batch angles: n=12 here is one call instead of 24 (rbx_frame -> screen_capture per angle). n=4 with top:true is the old rbx_montage. Pair with rbx_describe. Restores the camera after. " +
+      "Use it to batch angles: n=12 here is one call instead of 24 (rbx_frame -> screen_capture per angle). Pair with rbx_describe. Restores the camera after. " +
       "Trade-off: this grabs the OS window (Studio must be the visible foreground window) so frames include Studio chrome. For a FEW high-quality angles, loop rbx_frame(azimuth,elevation) -> the official screen_capture instead.",
     inputSchema: {
       target: z.string().optional().describe("Instance to orbit (recursive). Omit = whole workspace."),
@@ -204,7 +232,7 @@ server.registerTool(
       }
       for (const s of shots) {
         try {
-          await bridge.sendCommand("frame_dir", { target: a.target, azimuth: s.az, elevation: s.el, zoom });
+          await bridge.sendCommand("frame_dir", { target: a.target, azimuth: s.az, elevation: s.el, zoom }, FRAME_MS);
           const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
           content.push({ type: "text" as const, text: `--- ${s.label} ---` });
           content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
@@ -216,9 +244,11 @@ server.registerTool(
     } catch (e) {
       return errResult(e);
     } finally {
-      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
-      if (isoToken) await bridge.sendCommand("restore", { token: isoToken }).catch(() => {});
-      if (a.contrast && a.target) await bridge.sendCommand("contrast", { mode: "off" }).catch(() => {});
+      await teardown([
+        saved ? { action: "restore_camera", args: saved } : null,
+        isoToken ? { action: "restore", args: { token: isoToken } } : null,
+        a.contrast && a.target ? { action: "contrast", args: { mode: "off" } } : null,
+      ]);
     }
   }
 );
@@ -241,6 +271,150 @@ server.registerTool(
 );
 
 // --- build: parametric primitives --------------------------------------------
+// The build spec schema, shared by rbx_build (wrapped under `spec`) and rbx_batch
+// (build op args are the spec fields DIRECTLY). One source of truth so the batch
+// path can't drift from the single-build path. Exported for the test suite.
+export const BUILD_SPEC = z
+  .object({
+    kind: z.enum([
+      "slab", "room", "stairs", "cabinet", "table", "shelf", "bed",
+      "chair", "sofa", "armchair", "desk", "nightstand", "dresser", "wardrobe",
+      "fridge", "stove", "toilet", "bathtub", "prop",
+    ]),
+    parts: z
+      .array(
+        z
+          .object({
+            shape: z.enum(["box", "cylinder", "ball", "wedge"]).optional().describe("Default box. Cylinder length is along its LOCAL X — use rot to orient."),
+            pos: z.array(z.number()).length(3).optional().describe("[x,y,z] offset from center. Default [0,0,0]."),
+            size: z.array(z.number()).length(3),
+            rot: z.array(z.number()).length(3).optional().describe("[rx,ry,rz] degrees."),
+            color: z.array(z.number()).length(3).optional(),
+            material: z.string().optional(),
+            transparency: z.number().optional(),
+            neon: z.boolean().optional().describe("Material=Neon (glows)."),
+            canCollide: z.boolean().optional(),
+            negate: z.boolean().optional().describe("with spec.csg: SUBTRACT this part from the union (hollow out mugs/cups/bowls)."),
+            name: z.string().optional(),
+            light: z
+              .object({
+                color: z.array(z.number()).length(3).optional(),
+                brightness: z.number().optional(),
+                range: z.number().optional(),
+              })
+              .passthrough()
+              .optional()
+              .describe("Attach a PointLight to this part."),
+            fx: z
+              .union([
+                z.enum(["fire", "smoke", "magic", "energy", "sparkle"]),
+                z
+                  .object({
+                    preset: z.enum(["fire", "smoke", "magic", "energy", "sparkle"]).optional(),
+                    color: z.array(z.number()).length(3).optional().describe("[r,g,b] flat tint override."),
+                    rate: z.number().optional(),
+                    speed: z.number().optional(),
+                    size: z.number().optional().describe("multiplier on particle size."),
+                    texture: z.string().optional(),
+                  })
+                  .passthrough(),
+              ])
+              .optional()
+              .describe("Attach a tuned ParticleEmitter (+glow): 'fire'/'smoke'/'magic'/'energy'/'sparkle', or an object with overrides. Use for torches, magic orbs, energy cores, braziers."),
+          })
+          .passthrough()
+      )
+      .optional()
+      .describe("prop: primitive parts composed into one model (each pos is relative to center). Build any small prop without a dedicated kind."),
+    prop: z
+      .enum([
+        "mug", "bottle", "glass", "ashtray", "tablelamp", "floorlamp", "book",
+        "bookstack", "plate", "candle", "pictureframe", "clock", "telephone", "radio",
+        "smartphone", "laptop", "tv", "desklamp", "trashcan", "knifeblock", "vase", "teapot",
+        "desktop", "alarmclock", "retropc", "digitalclock", "gamingpc", "drone", "crate", "chest",
+        "sword", "shield", "torch", "coinstack", "holoorb", "lootbox", "barrel", "potion",
+        "toaster", "bowl", "candlestick", "transistor", "crttv", "speaker", "axe", "microwave",
+        "wineglass", "kettle", "pottedplant", "lantern", "ereader", "travelmug",
+        "futurecup", "winebottle", "holotv", "candelabra", "tankard", "mace",
+      ])
+      .optional()
+      .describe("prop preset: a ready-made multi-part prop (noir set-dressing). With this you can omit `parts`. `color` overrides the hero colour; `scale` resizes."),
+    scale: z.number().optional().describe("prop: uniform scale multiplier (default 1). Editable later via the Scale attribute (rebuilds in place)."),
+    seats: z.number().optional().describe("sofa: number of seat cushions (default 3)."),
+    drawers: z.number().optional().describe("nightstand: drawer count (default 2)."),
+    columns: z.number().optional().describe("dresser: drawer columns (default 2)."),
+    rows: z.number().optional().describe("dresser: drawer rows per column (default 3)."),
+    cushionColor: z.array(z.number()).length(3).optional().describe("sofa/armchair: [r,g,b] cushion color."),
+    cooktopColor: z.array(z.number()).length(3).optional().describe("stove: [r,g,b] cooktop color."),
+    style: z.string().optional().describe("cabinet: 'shaker' for frame+panel doors (else flat)."),
+    shelves: z.number().optional().describe("shelf: number of shelf boards; also fridge interior shelf count (default 3). Cabinet door sections use per-section `shelves`."),
+    panelColor: z.array(z.number()).length(3).optional().describe("cabinet shaker: [r,g,b] door panel color."),
+    mattressColor: z.array(z.number()).length(3).optional().describe("bed: [r,g,b] mattress color."),
+    name: z.string().optional(),
+    center: z.array(z.number()).length(3).describe("[x,y,z] center of the volume (prop: the origin parts offset from)."),
+    size: z.array(z.number()).length(3).optional().describe("[width,height,depth]. Required for all kinds except 'prop' (which uses per-part sizes)."),
+    thickness: z.number().optional().describe("Wall/slab thickness (cabinet: carcass panel thickness, default 0.4)."),
+    material: z.string().optional().describe("Roblox Material enum name, e.g. Brick, Concrete, WoodPlanks."),
+    color: z.array(z.number()).length(3).optional().describe("[r,g,b] 0-255."),
+    parent: z.string().optional().describe("Name of an existing model to parent into; else a new model in workspace."),
+    front: z
+      .array(
+        z.object({
+          type: z.enum(["drawers", "doors"]),
+          count: z.number(),
+          shelves: z.number().optional().describe("doors section: N interior shelves behind the doors (omit for empty, e.g. under a sink)."),
+        })
+      )
+      .optional()
+      .describe("cabinet: front layout, left→right sections. e.g. [{type:'drawers',count:3},{type:'doors',count:2,shelves:2}]."),
+    toeKick: z.boolean().optional().describe("cabinet: recessed base plinth."),
+    preset: z
+      .enum(["victorian", "midcentury", "rustic", "modern", "artdeco"])
+      .optional()
+      .describe("era/style preset — bundles color/material/style/hardware (your explicit fields still win)."),
+    weather: z.boolean().optional().describe("subtle per-part color variation so surfaces aren't dead-flat uniform."),
+    csg: z.boolean().optional().describe("union the static carcass into one smooth shell via CSG (drawers/doors/sink stay separate; guarded — falls back to parts on any failure)."),
+    plinth: z.boolean().optional().describe("dresser/case goods: add a 2-tier plinth base."),
+    bevel: z.boolean().optional().describe("table: chamfer the top edges (WedgePart, no CSG)."),
+    bullnose: z.boolean().optional().describe("cabinet+countertop: rounded front edge (cylinder nose) — KitchenUnit-style smooth counter."),
+    countertop: z.boolean().optional().describe("cabinet: add a slab countertop on top."),
+    backsplash: z.boolean().optional().describe("cabinet: add a backsplash (needs countertop)."),
+    sink: z
+      .object({
+        width: z.number().optional(),
+        depth: z.number().optional(),
+        offset: z.number().optional().describe("x offset of the basin from cabinet center."),
+        basinDepth: z.number().optional(),
+        basinColor: z.array(z.number()).length(3).optional(),
+        faucet: z.boolean().optional().describe("default true."),
+        apron: z.boolean().optional().describe("farmhouse apron sink: a big exposed white basin front flush at the cabinet face (hero element)."),
+      })
+      .optional()
+      .describe(
+        "cabinet+countertop: cut a basin hole THROUGH the counter + carcass top and drop in a sink (basin walls/bottom + gooseneck faucet) so it isn't capped by counter blocks. width/depth in studs (default ~55% inner width × D-1.2). Put doors (or nothing), not drawers, in the section under the sink."
+      ),
+    hardwareColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for pulls/knobs (default aged brass)."),
+    interiorColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for drawer trays/interior."),
+    door: z
+      .object({ wall: z.enum(["front", "back", "left", "right"]), width: z.number(), height: z.number() })
+      .optional(),
+    windows: z
+      .array(
+        z.object({
+          wall: z.enum(["front", "back", "left", "right"]),
+          width: z.number(),
+          height: z.number(),
+          sill: z.number(),
+          offset: z.number().optional().describe("Lateral offset from wall center."),
+        })
+      )
+      .optional(),
+    floor: z.boolean().optional(),
+    ceiling: z.boolean().optional(),
+    steps: z.number().optional().describe("stairs: number of steps."),
+  })
+  .passthrough();
+
 server.registerTool(
   "rbx_build",
   {
@@ -257,162 +431,14 @@ server.registerTool(
       "genuinely hollow mugs/bowls. CSG output is a final bake, no longer parametric. " +
       "\n\nReturns the model name and part count. Verify with rbx_qa, then capture (rbx_frame + the official screen_capture). Per-kind options are documented on the fields below.",
     inputSchema: {
-      spec: z
-        .object({
-          kind: z.enum([
-            "slab", "room", "stairs", "cabinet", "table", "shelf", "bed",
-            "chair", "sofa", "armchair", "desk", "nightstand", "dresser", "wardrobe",
-            "fridge", "stove", "toilet", "bathtub", "prop",
-          ]),
-          parts: z
-            .array(
-              z
-                .object({
-                  shape: z.enum(["box", "cylinder", "ball", "wedge"]).optional().describe("Default box. Cylinder length is along its LOCAL X — use rot to orient."),
-                  pos: z.array(z.number()).length(3).optional().describe("[x,y,z] offset from center. Default [0,0,0]."),
-                  size: z.array(z.number()).length(3),
-                  rot: z.array(z.number()).length(3).optional().describe("[rx,ry,rz] degrees."),
-                  color: z.array(z.number()).length(3).optional(),
-                  material: z.string().optional(),
-                  transparency: z.number().optional(),
-                  neon: z.boolean().optional().describe("Material=Neon (glows)."),
-                  canCollide: z.boolean().optional(),
-                  negate: z.boolean().optional().describe("with spec.csg: SUBTRACT this part from the union (hollow out mugs/cups/bowls)."),
-                  name: z.string().optional(),
-                  light: z
-                    .object({
-                      color: z.array(z.number()).length(3).optional(),
-                      brightness: z.number().optional(),
-                      range: z.number().optional(),
-                    })
-                    .passthrough()
-                    .optional()
-                    .describe("Attach a PointLight to this part."),
-                  fx: z
-                    .union([
-                      z.enum(["fire", "smoke", "magic", "energy", "sparkle"]),
-                      z
-                        .object({
-                          preset: z.enum(["fire", "smoke", "magic", "energy", "sparkle"]).optional(),
-                          color: z.array(z.number()).length(3).optional().describe("[r,g,b] flat tint override."),
-                          rate: z.number().optional(),
-                          speed: z.number().optional(),
-                          size: z.number().optional().describe("multiplier on particle size."),
-                          texture: z.string().optional(),
-                        })
-                        .passthrough(),
-                    ])
-                    .optional()
-                    .describe("Attach a tuned ParticleEmitter (+glow): 'fire'/'smoke'/'magic'/'energy'/'sparkle', or an object with overrides. Use for torches, magic orbs, energy cores, braziers."),
-                })
-                .passthrough()
-            )
-            .optional()
-            .describe("prop: primitive parts composed into one model (each pos is relative to center). Build any small prop without a dedicated kind."),
-          prop: z
-            .enum([
-              "mug", "bottle", "glass", "ashtray", "tablelamp", "floorlamp", "book",
-              "bookstack", "plate", "candle", "pictureframe", "clock", "telephone", "radio",
-              "smartphone", "laptop", "tv", "desklamp", "trashcan", "knifeblock", "vase", "teapot",
-              "desktop", "alarmclock", "retropc", "digitalclock", "gamingpc", "drone", "crate", "chest",
-              "sword", "shield", "torch", "coinstack", "holoorb", "lootbox", "barrel", "potion",
-              "toaster", "bowl", "candlestick", "transistor", "crttv", "speaker", "axe", "microwave",
-              "wineglass", "kettle", "pottedplant", "lantern", "ereader", "travelmug",
-              "futurecup", "winebottle", "holotv", "candelabra", "tankard", "mace",
-            ])
-            .optional()
-            .describe("prop preset: a ready-made multi-part prop (noir set-dressing). With this you can omit `parts`. `color` overrides the hero colour; `scale` resizes."),
-          scale: z.number().optional().describe("prop: uniform scale multiplier (default 1). Editable later via the Scale attribute (rebuilds in place)."),
-          seats: z.number().optional().describe("sofa: number of seat cushions (default 3)."),
-          drawers: z.number().optional().describe("nightstand: drawer count (default 2)."),
-          columns: z.number().optional().describe("dresser: drawer columns (default 2)."),
-          rows: z.number().optional().describe("dresser: drawer rows per column (default 3)."),
-          cushionColor: z.array(z.number()).length(3).optional().describe("sofa/armchair: [r,g,b] cushion color."),
-          cooktopColor: z.array(z.number()).length(3).optional().describe("stove: [r,g,b] cooktop color."),
-          style: z.string().optional().describe("cabinet: 'shaker' for frame+panel doors (else flat)."),
-          shelves: z.number().optional().describe("shelf: number of shelf boards; also fridge interior shelf count (default 3). Cabinet door sections use per-section `shelves`."),
-          panelColor: z.array(z.number()).length(3).optional().describe("cabinet shaker: [r,g,b] door panel color."),
-          mattressColor: z.array(z.number()).length(3).optional().describe("bed: [r,g,b] mattress color."),
-          name: z.string().optional(),
-          center: z.array(z.number()).length(3).describe("[x,y,z] center of the volume (prop: the origin parts offset from)."),
-          size: z.array(z.number()).length(3).optional().describe("[width,height,depth]. Required for all kinds except 'prop' (which uses per-part sizes)."),
-          thickness: z.number().optional().describe("Wall/slab thickness (cabinet: carcass panel thickness, default 0.4)."),
-          material: z.string().optional().describe("Roblox Material enum name, e.g. Brick, Concrete, WoodPlanks."),
-          color: z.array(z.number()).length(3).optional().describe("[r,g,b] 0-255."),
-          parent: z.string().optional().describe("Name of an existing model to parent into; else a new model in workspace."),
-          front: z
-            .array(
-              z.object({
-                type: z.enum(["drawers", "doors"]),
-                count: z.number(),
-                shelves: z.number().optional().describe("doors section: N interior shelves behind the doors (omit for empty, e.g. under a sink)."),
-              })
-            )
-            .optional()
-            .describe("cabinet: front layout, left→right sections. e.g. [{type:'drawers',count:3},{type:'doors',count:2,shelves:2}]."),
-          toeKick: z.boolean().optional().describe("cabinet: recessed base plinth."),
-          preset: z
-            .enum(["victorian", "midcentury", "rustic", "modern", "artdeco"])
-            .optional()
-            .describe("era/style preset — bundles color/material/style/hardware (your explicit fields still win)."),
-          weather: z.boolean().optional().describe("subtle per-part color variation so surfaces aren't dead-flat uniform."),
-          csg: z.boolean().optional().describe("union the static carcass into one smooth shell via CSG (drawers/doors/sink stay separate; guarded — falls back to parts on any failure)."),
-          plinth: z.boolean().optional().describe("dresser/case goods: add a 2-tier plinth base."),
-          bevel: z.boolean().optional().describe("table: chamfer the top edges (WedgePart, no CSG)."),
-          bullnose: z.boolean().optional().describe("cabinet+countertop: rounded front edge (cylinder nose) — KitchenUnit-style smooth counter."),
-          countertop: z.boolean().optional().describe("cabinet: add a slab countertop on top."),
-          backsplash: z.boolean().optional().describe("cabinet: add a backsplash (needs countertop)."),
-          sink: z
-            .object({
-              width: z.number().optional(),
-              depth: z.number().optional(),
-              offset: z.number().optional().describe("x offset of the basin from cabinet center."),
-              basinDepth: z.number().optional(),
-              basinColor: z.array(z.number()).length(3).optional(),
-              faucet: z.boolean().optional().describe("default true."),
-              apron: z.boolean().optional().describe("farmhouse apron sink: a big exposed white basin front flush at the cabinet face (hero element)."),
-            })
-            .optional()
-            .describe(
-              "cabinet+countertop: cut a basin hole THROUGH the counter + carcass top and drop in a sink (basin walls/bottom + gooseneck faucet) so it isn't capped by counter blocks. width/depth in studs (default ~55% inner width × D-1.2). Put doors (or nothing), not drawers, in the section under the sink."
-            ),
-          hardwareColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for pulls/knobs (default aged brass)."),
-          interiorColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for drawer trays/interior."),
-          door: z
-            .object({ wall: z.enum(["front", "back", "left", "right"]), width: z.number(), height: z.number() })
-            .optional(),
-          windows: z
-            .array(
-              z.object({
-                wall: z.enum(["front", "back", "left", "right"]),
-                width: z.number(),
-                height: z.number(),
-                sill: z.number(),
-                offset: z.number().optional().describe("Lateral offset from wall center."),
-              })
-            )
-            .optional(),
-          floor: z.boolean().optional(),
-          ceiling: z.boolean().optional(),
-          steps: z.number().optional().describe("stairs: number of steps."),
-        })
-        .passthrough(),
+      spec: BUILD_SPEC,
     },
   },
   async (a) => {
     try {
-      // Tolerate a flat call (some clients don't wrap under `spec`) and reject a
-      // kindless spec here with a clear message instead of letting the plugin
-      // throw the cryptic "unknown build kind: nil".
-      const spec: any = a && (a as any).spec ? (a as any).spec : a;
-      if (!spec || typeof spec !== "object" || !spec.kind) {
-        return errResult(
-          new Error(
-            "rbx_build: missing spec.kind. Call as {spec:{kind:'chair',center:[x,y,z],size:[w,h,d]}}."
-          )
-        );
-      }
-      return textResult(await bridge.sendCommand("build", spec, 60_000));
+      // a.spec is validated against BUILD_SPEC by the MCP SDK before we get here, so
+      // kind is guaranteed present — no need for the old kindless-spec check.
+      return textResult(await bridge.sendCommand("build", a.spec, 60_000));
     } catch (e) {
       return errResult(e);
     }
@@ -606,9 +632,7 @@ server.registerTool(
       "a handle off its panel → 'X splits into N groups'), and part-budget warnings, plus the overall bounding box. " +
       "Pair with rbx_orbit / rbx_floor_plan (or rbx_frame + screen_capture) for the visual side of QA. " +
       "fix=true auto-nudges each z-fighting part 0.06 off the shared plane (one undo step) — re-run to confirm. " +
-      "fit=true adds the CROSS-ASSEMBLY fit check: pieces from DIFFERENT sub-models whose faces nearly meet but leave a visible slot " +
-      "(a leg short of the floor, a panel not meeting its frame, a drawer front not filling its opening) — the gaps assemblyGaps can't see because it only looks WITHIN one model. " +
-      "Intended drawer/door slide clearances are excluded (via the Kind attribute). It's opt-in and rotation-approximate, so VERIFY each hit against a capture.",
+      "fit=true adds the CROSS-ASSEMBLY fit check (see the field). It's opt-in and rotation-approximate, so VERIFY each hit against a capture.",
     inputSchema: {
       target: z.string().describe("Instance name to lint (searched recursively)."),
       fix: z.boolean().optional().describe("Auto-resolve z-fights by nudging coplanar parts 0.06 apart (one undo step)."),
@@ -645,6 +669,30 @@ server.registerTool(
 );
 
 // --- batch: many build/edit ops as one undo step + one round trip -----------
+// Batch op args are passthrough (each op is {action, args}) — validate build ops against
+// the SAME spec schema rbx_build uses, so a malformed op (bad size, unknown kind) is
+// rejected here with an actionable message + op index instead of reaching the plugin and
+// throwing a cryptic error (or worse, silently building wrong geometry through the
+// plugin's clamped-size fallback). Exported for the test suite.
+export function validateBatchOps(
+  ops: { action: "build" | "edit"; args: Record<string, unknown> }[]
+): { action: "build" | "edit"; args: unknown }[] {
+  return ops.map((op, i) => {
+    if (op.action === "build") {
+      const spec = BUILD_SPEC.safeParse(op.args ?? {});
+      if (!spec.success) {
+        const first = spec.error.issues[0];
+        throw new Error(
+          `rbx_batch op ${i + 1} (build): ${first?.path?.join(".") || "spec"} — ${first?.message ?? "invalid"}. ` +
+            `Each build op is {action:'build',args:{kind:'chair',center:[x,y,z],size:[w,h,d]}}.`
+        );
+      }
+      return { action: "build" as const, args: spec.data };
+    }
+    return op;
+  });
+}
+
 server.registerTool(
   "rbx_batch",
   {
@@ -666,22 +714,8 @@ server.registerTool(
   },
   async (a) => {
     try {
-      // Batch op args are passthrough (not schema-validated like rbx_build), so a
-      // build op missing `kind` would reach the plugin and throw "unknown build
-      // kind: nil". Catch it here with an actionable message + op index.
-      for (let i = 0; i < a.ops.length; i++) {
-        const op: any = a.ops[i];
-        if (op.action === "build" && !(op.args && op.args.kind)) {
-          return errResult(
-            new Error(
-              `rbx_batch op ${i + 1}: build op missing args.kind (got ${JSON.stringify(
-                op.args
-              )}). Each build op is {action:'build',args:{kind:'chair',center:[x,y,z],size:[w,h,d]}}.`
-            )
-          );
-        }
-      }
-      return textResult(await bridge.sendCommand("batch", { ops: a.ops }, 120_000));
+      const validated = validateBatchOps(a.ops);
+      return textResult(await bridge.sendCommand("batch", { ops: validated }, 120_000));
     } catch (e) {
       return errResult(e);
     }
@@ -1349,7 +1383,7 @@ server.registerTool(
       if (moveCam) {
         saved = await bridge.sendCommand("save_camera").catch(() => null);
         canMove = !!saved;
-        if (canMove && !a.follow) await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 });
+        if (canMove && !a.follow) await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 }, FRAME_MS);
       }
       const header =
         `watching ${a.target ?? "current view"} — ${frames} frames every ~${interval}s` +
@@ -1358,7 +1392,7 @@ server.registerTool(
       for (let i = 0; i < frames; i++) {
         const t = (i * interval).toFixed(1);
         try {
-          if (canMove && a.follow) await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 });
+          if (canMove && a.follow) await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 }, FRAME_MS);
           const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
           content.push({ type: "text" as const, text: `--- t=${t}s ---` });
           content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
@@ -1374,7 +1408,7 @@ server.registerTool(
     } catch (e) {
       return errResult(e);
     } finally {
-      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
+      await teardown([saved ? { action: "restore_camera", args: saved } : null]);
     }
   }
 );
@@ -1477,7 +1511,13 @@ async function main() {
   process.stdin.on("end", () => process.exit(0));
   process.stdin.on("close", () => process.exit(0));
 }
-main().catch((e) => {
-  console.error("[buildkit] fatal:", e);
-  process.exit(1);
-});
+
+// Boot only when run directly (node dist/index.js / npm start), so tests can import
+// the module to assert on registered tools without spawning a bridge/server.
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch((e) => {
+    console.error("[buildkit] fatal:", e);
+    process.exit(1);
+  });
+}

@@ -40,7 +40,6 @@ export class Bridge {
   private pending = new Map<string, Pending>();
   private seq = 0;
   private server?: http.Server;
-  private lastSeen = 0;
   private activePlace: string | null = null;
   private places = new Map<string, number>(); // edit place name -> last poll time
   private runtimePlaces = new Map<string, number>(); // play-mode harness place -> last poll
@@ -55,10 +54,19 @@ export class Bridge {
   // Creator ID, ComfyUI URL, Hunyuan endpoint, build-mode toggles). Held in memory so
   // tools (mesh upload / ComfyUI) can read them; never persisted to disk or a place.
   private config: Record<string, unknown> = {};
+  // Optional shared-secret bridge auth (env BRIDGE_TOKEN or config key "bridgeToken").
+  // When set, every plugin-boundary request must present it as X-BuildKit-Token. This
+  // stops a rogue local process from POSTing /submit (driving Studio) or /config
+  // (overwriting creds) to the real bridge, and lets the plugin verify the server before
+  // pushing secrets. Not a defense against a pre-existing port squatter — it receives the
+  // token from the plugin's own request — so the config file + trust model stay documented.
+  private token = "";
 
-  async start(port: number): Promise<void> {
+  async start(port: number, tokenOverride?: string): Promise<void> {
     this.port = port;
     this.config = await loadConfig(); // seed creds from the user-local config file
+    this.token = tokenOverride || process.env.BRIDGE_TOKEN || (typeof this.config.bridgeToken === "string" ? this.config.bridgeToken : "");
+    if (this.token) console.error("[buildkit] bridge token required (env BRIDGE_TOKEN or config bridgeToken)");
     try {
       await this.listen(port);
       this.mode = "owner";
@@ -109,10 +117,6 @@ export class Bridge {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
-  pluginConnected(): boolean {
-    return Date.now() - this.lastSeen < 5000;
-  }
-
   setActivePlace(place: string | null) {
     this.activePlace = place && place.trim() ? place.trim() : null;
   }
@@ -127,18 +131,31 @@ export class Bridge {
   configPath(): string {
     return CONFIG_PATH;
   }
+  // Keys the plugin's Settings panel may push. Whitelist so a rogue caller can't
+  // spray arbitrary junk into the config object (and so nothing beyond the known
+  // settings survives a save).
+  private static CONFIG_KEYS = ["openCloudKey", "creatorId", "creatorType", "comfyUrl", "hunyuanUrl", "bridgeToken"];
   // Merge a /config push into the in-memory config and persist to the local file.
   // Skip empty-string values so a blank panel field never WIPES a saved secret
-  // (the plugin pushes openCloudKey:"" when the panel box is empty).
-  private async applyConfig(incoming: Record<string, unknown>): Promise<void> {
+  // (the plugin pushes openCloudKey:"" when the panel box is empty). Unknown keys
+  // are dropped. Resolves false when the save fails so the caller can surface it.
+  private async applyConfig(incoming: Record<string, unknown>): Promise<boolean> {
+    let changed = false;
     for (const [k, v] of Object.entries(incoming)) {
+      if (!Bridge.CONFIG_KEYS.includes(k)) continue;
       if (v === "" || v == null) continue;
-      this.config[k] = v;
+      if (this.config[k] !== v) {
+        this.config[k] = v;
+        changed = true;
+      }
     }
+    if (!changed) return true; // nothing new to persist — don't churn the file
     try {
       await saveConfig(this.config);
+      return true;
     } catch (e) {
       console.error("[buildkit] config save failed:", e);
+      return false;
     }
   }
   // Pollers seen within 30s (window > the 25s long-poll hold, so an idle poller
@@ -254,13 +271,15 @@ export class Bridge {
   private httpJson(method: string, path: string, body: unknown, timeoutMs: number): Promise<any> {
     return new Promise((resolve, reject) => {
       const data = body == null ? "" : JSON.stringify(body);
+      const headers: Record<string, string> = { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(data)) };
+      if (this.token) headers["X-BuildKit-Token"] = this.token;
       const req = http.request(
         {
           host: "127.0.0.1",
           port: this.port,
           path,
           method,
-          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+          headers,
         },
         (res) => {
           let buf = "";
@@ -288,19 +307,32 @@ export class Bridge {
     return this.queue.splice(i, 1)[0];
   }
 
+  // When a bridge token is configured, require X-BuildKit-Token on plugin-facing
+  // endpoints. Returns false (and has written a 401) when the request is rejected.
+  private requireToken(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+    if (!this.token) return true;
+    if (req.headers["x-buildkit-token"] === this.token) return true;
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+    return false;
+  }
+
   private onRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = req.url || "";
     if (req.method === "GET" && url.startsWith("/poll")) {
       if (this.rejectBrowser(req, res)) return; // block cross-origin browser theft of plugin commands
-      this.lastSeen = Date.now();
+      if (!this.requireToken(req, res)) return; // token required if configured
       const params = new URL(url, "http://x").searchParams;
       const place = params.get("place") || "";
       const ctx = params.get("ctx") || "edit";
       if (place) (ctx === "runtime" ? this.runtimePlaces : this.places).set(place, Date.now());
+      // Echo a positive auth signal back so the plugin can confirm this is the real server
+      // before it pushes secrets. Header-only: the poll body stays a command (or empty).
+      const headers = { "Content-Type": "application/json", "X-BuildKit-Auth": this.token ? "ok" : "" };
 
       const cmd = this.takeFor(place, ctx);
       if (cmd) {
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, headers);
         res.end(JSON.stringify(cmd));
         return;
       }
@@ -309,7 +341,7 @@ export class Bridge {
       const fn = (c: Cmd | null) => {
         if (done) return;
         done = true;
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, headers);
         res.end(c ? JSON.stringify(c) : "");
       };
       const waiter: Waiter = { fn, place, ctx };
@@ -331,7 +363,7 @@ export class Bridge {
 
     if (req.method === "POST" && url.startsWith("/result")) {
       if (this.rejectBrowser(req, res)) return; // block drive-by browser spoofing of command results
-      this.lastSeen = Date.now();
+      if (!this.requireToken(req, res)) return;
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
@@ -357,6 +389,7 @@ export class Bridge {
     // Shared bridge: another MCP server (client mode) forwards a command here.
     if (req.method === "POST" && url.startsWith("/submit")) {
       if (this.rejectBrowser(req, res)) return; // defense-in-depth: reject any browser-origin request
+      if (!this.requireToken(req, res)) return; // token required if configured
       if (!this.requireJson(req, res)) return; // block drive-by browser CSRF (no-preflight POSTs)
       let body = "";
       req.on("data", (chunk) => (body += chunk));
@@ -379,6 +412,7 @@ export class Bridge {
 
     // Shared bridge: client seeds/refreshes its place caches from the owner.
     if (req.method === "GET" && url.startsWith("/places")) {
+      if (!this.requireToken(req, res)) return;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ places: this.listPlaces(), runtimePlaces: this.listRuntimePlaces() }));
       return;
@@ -387,6 +421,7 @@ export class Bridge {
     // Settings panel pushes its config here (held in memory for upload/ComfyUI tools).
     if (req.method === "POST" && url.startsWith("/config")) {
       if (this.rejectBrowser(req, res)) return; // defense-in-depth: reject any browser-origin request
+      if (!this.requireToken(req, res)) return; // token required if configured — secrets endpoint
       if (!this.requireJson(req, res)) return; // creds endpoint — same CSRF guard as /submit
       let body = "";
       req.on("data", (chunk) => (body += chunk));
@@ -399,11 +434,19 @@ export class Bridge {
         }
         if (parsed) {
           this.applyConfig(parsed)
-            .then(() => console.error(`[buildkit] settings saved -> ${CONFIG_PATH}`))
-            .catch(() => {});
+            .then((saved) => {
+              if (saved) console.error(`[buildkit] settings saved -> ${CONFIG_PATH}`);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: saved, path: CONFIG_PATH }));
+            })
+            .catch(() => {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "config save failed" }));
+            });
+          return;
         }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, path: CONFIG_PATH }));
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "bad json" }));
       });
       return;
     }

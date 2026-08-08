@@ -256,6 +256,62 @@ describe("endpoint guards", () => {
     expect(JSON.parse(res.body)).toHaveProperty("places");
   });
 
+  it("401s every endpoint without the bridge token when one is configured", async () => {
+    const port = await freePort();
+    const b = new Bridge();
+    await b.start(port, "s3cret");
+    open.push(b);
+    for (const [method, path] of [
+      ["GET", "/poll?place=P"],
+      ["POST", "/result"],
+      ["POST", "/submit"],
+      ["POST", "/config"],
+      ["GET", "/places"],
+    ] as const) {
+      const noToken = await req(port, method, path, {});
+      expect(noToken.status, `${method} ${path} without token`).toBe(401);
+      const badToken = await req(port, method, path, {}, { "X-BuildKit-Token": "wrong" });
+      expect(badToken.status, `${method} ${path} wrong token`).toBe(401);
+    }
+  });
+
+  it("accepts a request carrying the configured bridge token", async () => {
+    const port = await freePort();
+    const b = new Bridge();
+    await b.start(port, "s3cret");
+    open.push(b);
+    const res = await req(port, "GET", "/places", undefined, { "X-BuildKit-Token": "s3cret" });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toHaveProperty("places");
+  });
+
+  it("serves a poll with X-BuildKit-Auth: ok when the token is validated", async () => {
+    const port = await freePort();
+    const b = new Bridge();
+    await b.start(port, "s3cret");
+    open.push(b);
+    const pending = b.sendCommand("ping", {}, 5000);
+    const poll = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>(
+      (resolve, reject) => {
+        const r = http.request(
+          { host: "127.0.0.1", port, path: "/poll?place=P", method: "GET", headers: { "X-BuildKit-Token": "s3cret" } },
+          (res2) => {
+            let buf = "";
+            res2.on("data", (c) => (buf += c));
+            res2.on("end", () => resolve({ status: res2.statusCode ?? 0, headers: res2.headers, body: buf }));
+          }
+        );
+        r.on("error", reject);
+        r.end();
+      }
+    );
+    expect(poll.status).toBe(200);
+    expect(String(poll.headers["x-buildkit-auth"])).toBe("ok");
+    expect(JSON.parse(poll.body)).toHaveProperty("id");
+    await req(port, "POST", "/result", { id: JSON.parse(poll.body).id, ok: true, result: {} }, { "Content-Type": "application/json", "X-BuildKit-Token": "s3cret" });
+    await expect(pending).resolves.toEqual({});
+  });
+
   it("404s an unknown path", async () => {
     const port = await freePort();
     await startBridge(port);

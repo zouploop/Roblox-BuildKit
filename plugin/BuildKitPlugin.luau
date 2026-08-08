@@ -18,11 +18,21 @@ local RUNNING = true
 -- in-game channel, and needs ServerScriptService.LoadStringEnabled ticked + HTTP on.
 -- Every command is pcall-guarded (incl. the loadstring call) so the poll loop can
 -- never die — a disabled loadstring just returns a clear error.
+-- __BRIDGE_TOKEN__ is replaced by runtime_install with the plugin's configured token.
 local RUNTIME_SOURCE = [==[
 -- BuildKitRuntime (installed by rbx_runtime). Runs in the PLAY datamodel.
 local HttpService = game:GetService("HttpService")
 local BASE = "http://127.0.0.1:44760"
 local PLACE = tostring(game.Name)
+local BRIDGE_TOKEN = "__BRIDGE_TOKEN__"
+
+local function reqHeaders()
+	local h = { ["Content-Type"] = "application/json" }
+	if BRIDGE_TOKEN ~= "" and BRIDGE_TOKEN ~= "__BRIDGE_TOKEN__" then
+		h["X-BuildKit-Token"] = BRIDGE_TOKEN
+	end
+	return h
+end
 
 local MAXNODES = 500
 local function safe(v, depth, budget)
@@ -49,7 +59,7 @@ local function post(path, body)
 		HttpService:RequestAsync({
 			Url = BASE .. path,
 			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
+			Headers = reqHeaders(),
 			Body = HttpService:JSONEncode(body),
 		})
 	end)
@@ -77,14 +87,17 @@ local function handle(cmd)
 end
 
 task.spawn(function()
+	local backoff = 1.0
 	while true do
 		local ok, res = pcall(function()
 			return HttpService:RequestAsync({
 				Url = BASE .. "/poll?place=" .. HttpService:UrlEncode(PLACE) .. "&ctx=runtime",
 				Method = "GET",
+				Headers = reqHeaders(),
 			})
 		end)
 		if ok and res and res.Success and res.Body and #res.Body > 0 then
+			backoff = 1.0
 			local okd, cmd = pcall(function()
 				return HttpService:JSONDecode(res.Body)
 			end)
@@ -96,9 +109,14 @@ task.spawn(function()
 				else
 					post("/result", { id = cmd.id, ok = (err == nil), result = result, error = err })
 				end
+			elseif not okd then
+				post("/result", { ok = false, error = "runtime could not decode command: " .. tostring(res.Body) })
 			end
-		elseif not ok then
-			task.wait(1.0)
+		elseif ok and res and res.Success then
+			task.wait(0.1) -- empty long-poll timeout; avoid a hot loop
+		else
+			task.wait(backoff)
+			backoff = math.min(backoff * 2, 10)
 		end
 	end
 end)
@@ -154,6 +172,17 @@ local function findInst(target)
 		return workspace
 	end
 	return workspace:FindFirstChild(target, true)
+end
+
+-- workspace.CurrentCamera can be nil (edit mode with the viewport closed, or a fresh
+-- session before Studio wires the camera up). Every camera handler must route through
+-- this so a nil camera fails with a clear message instead of a raw dereference error.
+local function camera()
+	local cam = workspace.CurrentCamera
+	if not cam then
+		error("no active camera — open/focus the Studio 3D viewport, then retry")
+	end
+	return cam
 end
 
 local function bboxOf(inst)
@@ -2890,22 +2919,34 @@ local ATTR = {
 
 -- Hide a part, remembering its original Transparency on the part itself. Never
 -- overwrite an existing stash: re-hiding an already-hidden part would record 1 and
--- make the restore a no-op (nested cutaway + isolate is a real case).
+-- make the restore a no-op (nested cutaway + isolate is a real case). Skips locked
+-- parts — a part that can't be changed must never be marked "hidden" (the attribute
+-- stash would stay behind forever, since restore can't write its Transparency either).
+-- Returns true if the part was actually hidden.
 local function hidePart(p)
+	if p.Locked then
+		return false
+	end
 	if p:GetAttribute(ATTR.hidden) == nil then
 		p:SetAttribute(ATTR.hidden, p.Transparency)
 	end
 	p.Transparency = 1
+	return true
 end
 
 -- Recolor a part for contrast mode, remembering its original Color/Material.
+-- Skips locked parts for the same reason as hidePart. Returns true if recolored.
 local function contrastPart(p, color)
+	if p.Locked then
+		return false
+	end
 	if p:GetAttribute(ATTR.contrastColor) == nil then
 		p:SetAttribute(ATTR.contrastColor, p.Color)
 		p:SetAttribute(ATTR.contrastMat, p.Material.Name)
 	end
 	p.Color = color
 	p.Material = Enum.Material.SmoothPlastic
+	return true
 end
 
 local handlers = {}
@@ -2919,7 +2960,7 @@ end
 -- camera stays frozen after a capture. Returns the viewport pixel size too, which
 -- the Node side uses to crop Studio chrome (Explorer/Output) out of the screenshot.
 function handlers.save_camera()
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	local c = cam.CFrame
 	local f = cam.Focus
 	local vp = cam.ViewportSize
@@ -2932,7 +2973,7 @@ function handlers.save_camera()
 end
 
 function handlers.restore_camera(args)
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	if args.cframe and #args.cframe == 12 then
 		cam.CFrame = CFrame.new(table.unpack(args.cframe))
 	end
@@ -2953,7 +2994,7 @@ end
 -- Fit math shared by frame (moves the camera) and frame_coords (returns only).
 local function computeFrame(target, view, zoom)
 	local center, size = getBBox(target)
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	view = view or "iso"
 	local dir = (VIEW_DIRS[view] or VIEW_DIRS.iso).Unit
 	local fov = cam.FieldOfView
@@ -2965,7 +3006,7 @@ end
 
 function handlers.frame(args)
 	local center, size, camPos, _, view = computeFrame(args.target, args.view, args.zoom)
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	if view == "top" then
 		cam.CFrame = CFrame.lookAt(camPos, center, Vector3.new(0, 0, -1))
 	else
@@ -2996,7 +3037,7 @@ end
 -- az=0 looks down +Z (front), az=90 looks down +X (right); el lifts above horizon.
 function handlers.frame_dir(args)
 	local center, size = getBBox(args.target)
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	local az = math.rad(args.azimuth or 0)
 	local el = math.rad(args.elevation or 20)
 	local dir = Vector3.new(math.cos(el) * math.sin(az), math.sin(el), math.cos(el) * math.cos(az))
@@ -3027,7 +3068,7 @@ end
 -- agent do a turntable through the official tool: loop azimuths, capture each.
 function handlers.frame_dir_coords(args)
 	local center, size = getBBox(args.target)
-	local cam = workspace.CurrentCamera
+	local cam = camera()
 	local az = math.rad(args.azimuth or 0)
 	local el = math.rad(args.elevation or 20)
 	local dir = Vector3.new(math.cos(el) * math.sin(az), math.sin(el), math.cos(el) * math.cos(az))
@@ -3060,6 +3101,7 @@ function handlers.edit(args)
 		bC, bS = bboxOf(inst)
 	end
 	return recorded("BuildKit edit " .. tostring(op), function()
+		local skipped = 0 -- locked parts a per-part op couldn't touch (recolor/material/anchor)
 		if op == "delete" then
 			local n = inst.Name
 			inst.Parent = nil -- ponytail: Parent=nil not Destroy() so undo can restore it
@@ -3112,15 +3154,28 @@ function handlers.edit(args)
 		elseif op == "recolor" then
 			local c = colorOf(args.color, nil)
 			if not c then error("recolor needs color [r,g,b]") end
-			for _, p in ipairs(partsOf(inst)) do p.Color = c end
+			local parts = partsOf(inst)
+			for _, p in ipairs(parts) do
+				-- pcall each part so a locked part can't abort the rest of the loop.
+				local okP = pcall(function() p.Color = c end)
+				if not okP then skipped = skipped + 1 end
+			end
 		elseif op == "material" then
 			local m = matOf(args.material, nil)
 			if not m then error("material not found: " .. tostring(args.material)) end
-			for _, p in ipairs(partsOf(inst)) do p.Material = m end
-			elseif op == "anchor" then
-				local v = args.anchored
-				if v == nil then v = true end
-				for _, p in ipairs(partsOf(inst)) do p.Anchored = v end
+			local parts = partsOf(inst)
+			for _, p in ipairs(parts) do
+				local okP = pcall(function() p.Material = m end)
+				if not okP then skipped = skipped + 1 end
+			end
+		elseif op == "anchor" then
+			local v = args.anchored
+			if v == nil then v = true end
+			local parts = partsOf(inst)
+			for _, p in ipairs(parts) do
+				local okP = pcall(function() p.Anchored = v end)
+				if not okP then skipped = skipped + 1 end
+			end
 		else
 			error("unknown edit op: " .. tostring(op))
 		end
@@ -3131,6 +3186,7 @@ function handlers.edit(args)
 				center = { r1(center.X), r1(center.Y), r1(center.Z) },
 				size = { r1(size.X), r1(size.Y), r1(size.Z) },
 			}
+			if skipped > 0 then res.skippedLocked = skipped end
 			if bC then
 				local d = center - bC
 				res.movedBy = { r1(d.X), r1(d.Y), r1(d.Z) }
@@ -3316,7 +3372,9 @@ local function assemblyGaps(root, out, ov, seats)
 end
 
 -- Core QA scan over an instance (shared by handlers.qa and the build handler's auto-QA).
-qaScan = function(inst, doFix)
+-- Deliberately NOT a global: this file otherwise keeps every helper local, and a leaked
+-- global here could collide with another plugin's `qaScan`.
+local qaScan = function(inst, doFix)
 	local args = { fix = doFix }
 	local parts = partsOf(inst)
 	local n = #parts
@@ -3675,39 +3733,56 @@ function handlers.cutaway(args)
 		error("target not found: " .. tostring(args.target))
 	end
 	local center, size = getBBox(args.target)
-	local y = args.y
-	if not y then
-		y = (center.Y + size.Y / 2) - size.Y * 0.15 -- default: hide top 15%
+	local y
+	if args.mode == "y" then
+		-- Hide above an explicit world height (rbx_floor_plan / rbx_capture cutawayY).
+		if not args.y then
+			error("cutaway mode='y' requires y (world height)")
+		end
+		y = args.y
+	elseif args.mode == "roof" then
+		-- Hide the model's top slice so the interior is readable — down to ~15% below the
+		-- bbox top, i.e. "cut the roof off".
+		y = (center.Y + size.Y / 2) - size.Y * 0.15
+	else
+		-- Legacy callers (no mode): fall back to the old default (hide top 15%).
+		y = (center.Y + size.Y / 2) - size.Y * 0.15
 	end
 	cutSeq += 1
 	local token = "cut" .. cutSeq
-	-- Hide by Transparency=1, NOT reparent-to-nil: a lost restore then just leaves
-	-- a part invisible (recoverable), never orphaned + garbage-collected.
-	local hidden = {}
+	-- Register the token BEFORE mutating so a throw partway through the hide loop can never
+	-- strand parts with no restorable token. Hidden parts that fail (locked) are simply
+	-- skipped, so the recorded list always matches what actually changed.
+	cutStore[token] = {}
+	local hidden = cutStore[token]
 	for _, d in ipairs(root:GetDescendants()) do
 		if d:IsA("BasePart") and not d:IsA("Terrain") and d.Position.Y > y then
-			table.insert(hidden, { inst = d, transparency = d.Transparency })
-			hidePart(d)
+			local orig = d.Transparency
+			if hidePart(d) then
+				table.insert(hidden, { inst = d, transparency = orig })
+			end
 		end
 	end
-	cutStore[token] = hidden
 	return { token = token, hiddenCount = #hidden, y = y }
 end
 
 -- Un-hide a cutaway/isolate token: restore each part's saved Transparency.
+-- Reports a miss for an unknown token instead of silently no-oping, so a stale
+-- token (server/plugin state divergence) surfaces as a real error.
 function handlers.restore(args)
 	local hidden = cutStore[args.token]
-	if hidden then
-		for _, e in ipairs(hidden) do
-			if e.inst and e.inst.Parent then
-				pcall(function()
-					e.inst.Transparency = e.transparency
-					e.inst:SetAttribute(ATTR.hidden, nil)
-				end)
-			end
-		end
-		cutStore[args.token] = nil
+	if not hidden then
+		return { restored = false, reason = "unknown or already-restored token: " .. tostring(args.token) }
 	end
+	for _, e in ipairs(hidden) do
+		if e.inst and e.inst.Parent then
+			pcall(function()
+				e.inst.Transparency = e.transparency
+				e.inst:SetAttribute(ATTR.hidden, nil)
+			end)
+		end
+	end
+	cutStore[args.token] = nil
 	return { restored = true }
 end
 
@@ -3720,43 +3795,53 @@ end
 -- rebuild the undo from the DataModel alone. Runs on plugin load and is exposed as a
 -- command, so "everything went invisible" is always one call away from fixed.
 function handlers.restore_all()
-	local shown, recolored = 0, 0
+	local shown, recolored, skipped = 0, 0, 0
 	for _, d in ipairs(workspace:GetDescendants()) do
 		if d:IsA("BasePart") then
 			local t = d:GetAttribute(ATTR.hidden)
 			if type(t) == "number" then
-				pcall(function()
-					d.Transparency = t
-					d:SetAttribute(ATTR.hidden, nil)
-				end)
-				shown += 1
+				if d.Locked then
+					-- Can't restore a locked part's Transparency; leave the stash so a later
+					-- unlock + rbx_restore can still fix it. Don't count it as shown.
+					skipped += 1
+				else
+					pcall(function()
+						d.Transparency = t
+						d:SetAttribute(ATTR.hidden, nil)
+					end)
+					shown += 1
+				end
 			end
 			local c = d:GetAttribute(ATTR.contrastColor)
 			local m = d:GetAttribute(ATTR.contrastMat)
 			if typeof(c) == "Color3" then
-				pcall(function()
-					d.Color = c
-					-- Enum.Material[bad] THROWS rather than returning nil, so guard the
-					-- lookup separately — an unrecognized saved name must not abort the
-					-- color restore or leave the attributes behind.
-					if type(m) == "string" then
-						local okMat, mat = pcall(function()
-							return Enum.Material[m]
-						end)
-						if okMat and mat then
-							d.Material = mat
+				if d.Locked then
+					skipped += 1
+				else
+					pcall(function()
+						d.Color = c
+						-- Enum.Material[bad] THROWS rather than returning nil, so guard the
+						-- lookup separately — an unrecognized saved name must not abort the
+						-- color restore or leave the attributes behind.
+						if type(m) == "string" then
+							local okMat, mat = pcall(function()
+								return Enum.Material[m]
+							end)
+							if okMat and mat then
+								d.Material = mat
+							end
 						end
-					end
-					d:SetAttribute(ATTR.contrastColor, nil)
-					d:SetAttribute(ATTR.contrastMat, nil)
-				end)
-				recolored += 1
+						d:SetAttribute(ATTR.contrastColor, nil)
+						d:SetAttribute(ATTR.contrastMat, nil)
+					end)
+					recolored += 1
+				end
 			end
 		end
 	end
 	-- Drop the in-memory tokens too; the DataModel is now the source of truth.
 	table.clear(cutStore)
-	return { restored = true, shown = shown, recolored = recolored }
+	return { restored = true, shown = shown, recolored = recolored, skipped = skipped }
 end
 
 function handlers.inspect(args)
@@ -4419,12 +4504,15 @@ function handlers.isolate(args)
 	end
 	cutSeq += 1
 	local token = "iso" .. cutSeq
-	-- Skip Terrain (its Transparency isn't meaningful) and the target's own parts.
-	local hidden = {}
+	-- Register the token BEFORE mutating (see cutaway) so a throw can't strand parts.
+	cutStore[token] = {}
+	local hidden = cutStore[token]
 	for _, d in ipairs(workspace:GetDescendants()) do
 		if d:IsA("BasePart") and not d:IsA("Terrain") and not keepSet[d] then
-			table.insert(hidden, { inst = d, transparency = d.Transparency })
-			hidePart(d)
+			local orig = d.Transparency
+			if hidePart(d) then
+				table.insert(hidden, { inst = d, transparency = orig })
+			end
 		end
 	end
 	cutStore[token] = hidden
@@ -4525,14 +4613,17 @@ function handlers.contrast(args)
 	end
 	cutSeq += 1
 	local token = "cont" .. cutSeq
-	local stash = {}
+	-- Register the token BEFORE mutating (see cutaway) so a throw can't strand parts.
+	cutStore[token] = {}
+	local stash = cutStore[token]
 	local i = 0
 	for _, p in ipairs(partsOf(inst)) do
-		table.insert(stash, { inst = p, color = p.Color, material = p.Material })
+		local origC, origM = p.Color, p.Material
+		if contrastPart(p, CONTRAST_PALETTE[(i % #CONTRAST_PALETTE) + 1]) then
+			table.insert(stash, { inst = p, color = origC, material = origM })
+		end
 		i += 1
-		contrastPart(p, CONTRAST_PALETTE[(i % #CONTRAST_PALETTE) + 1])
 	end
-	cutStore[token] = stash
 	return { mode = "on", token = token, count = #stash }
 end
 
@@ -4546,7 +4637,7 @@ function handlers.runtime_install()
 	end
 	local s = Instance.new("Script")
 	s.Name = "BuildKitRuntime"
-	s.Source = RUNTIME_SOURCE
+	s.Source = RUNTIME_SOURCE:gsub("__BRIDGE_TOKEN__", BRIDGE_TOKEN)
 	s.Parent = sss
 	local httpOk = pcall(function()
 		game:GetService("HttpService").HttpEnabled = true
@@ -4845,6 +4936,9 @@ function handlers.build_gui(spec)
 	if not spec or not spec.root then
 		error("build_gui needs a root node")
 	end
+	-- Validate the camera BEFORE any DataModel mutation: a nil camera must fail here,
+	-- not after the GUI is half-installed into StarterGui/CoreGui.
+	local cam = camera()
 	return recorded("BuildKit GUI " .. tostring(spec.name or "Gui"), function()
 	local theme = gmerge(GUI_DEFAULT_THEME, spec.theme or {})
 	local name = spec.name or "BuildKitGui"
@@ -4874,7 +4968,7 @@ function handlers.build_gui(spec)
 	preview:SetAttribute("BuildKitPreview", name)
 	preview.Parent = coreGui
 
-	local vp = workspace.CurrentCamera.ViewportSize
+	local vp = cam.ViewportSize
 	return {
 		name = name,
 		enabled = sg.Enabled,
@@ -4901,7 +4995,7 @@ function handlers.gui_preview(args)
 	preview.Enabled = true
 	preview:SetAttribute("BuildKitPreview", name)
 	preview.Parent = coreGui
-	local vp = workspace.CurrentCamera.ViewportSize
+	local vp = camera().ViewportSize
 	return { mode = "on", viewport = { vp.X, vp.Y } }
 end
 
@@ -4935,12 +5029,25 @@ function handlers.set_lighting(args)
 end
 
 -- ---------- long-poll loop ---------------------------------------------------
+-- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
+-- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
+-- When set, the plugin sends it on every request AND only auto-pushes config after a
+-- poll answers X-BuildKit-Auth: ok — so secrets never go to an unverified listener.
+local BRIDGE_TOKEN = tostring(plugin:GetSetting("bk_bridgeToken") or "")
+local function reqHeaders()
+	local h = { ["Content-Type"] = "application/json" }
+	if BRIDGE_TOKEN ~= "" then
+		h["X-BuildKit-Token"] = BRIDGE_TOKEN
+	end
+	return h
+end
+
 local function post(path, body)
 	pcall(function()
 		HttpService:RequestAsync({
 			Url = BASE .. path,
 			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
+			Headers = reqHeaders(),
 			Body = HttpService:JSONEncode(body),
 		})
 	end)
@@ -4983,38 +5090,59 @@ local function pushSavedConfig()
 end
 
 task.spawn(function()
+	local backoff = 1.0
 	while true do
 		if not RUNNING then
 			task.wait(0.5)
 			continue
 		end
 		local ok, res = pcall(function()
-			return HttpService:RequestAsync({ Url = BASE .. "/poll?place=" .. HttpService:UrlEncode(PLACE), Method = "GET" })
+			return HttpService:RequestAsync({
+				Url = BASE .. "/poll?place=" .. HttpService:UrlEncode(PLACE),
+				Method = "GET",
+				Headers = reqHeaders(),
+			})
 		end)
-		if ok and res and res.Success and not configPushed then
-			pushSavedConfig() -- seed the MCP bridge with saved/default creds once it's reachable
-		end
-		if ok and res and res.Success and res.Body and #res.Body > 0 then
-			local okd, cmd = pcall(function()
-				return HttpService:JSONDecode(res.Body)
-			end)
-			if okd and cmd and cmd.id then
-				local handler = handlers[cmd.action]
-				local result, err
-				if handler then
-					local ok2, r = pcall(handler, cmd.args or {})
-					if ok2 then
-						result = r
-					else
-						err = tostring(r)
-					end
-				else
-					err = "unknown action: " .. tostring(cmd.action)
-				end
-				post("/result", { id = cmd.id, ok = (err == nil), result = result, error = err })
+		if ok and res and res.Success then
+			backoff = 1.0 -- server answered; reset the failure backoff
+			local authed = BRIDGE_TOKEN == "" or tostring(res.Headers and res.Headers["x-buildkit-auth"]) == "ok"
+			if authed and not configPushed then
+				pushSavedConfig() -- seed the MCP bridge with saved/default creds once it's reachable
 			end
-		elseif not ok then
-			task.wait(1.0) -- server down; back off
+			if res.Body and #res.Body > 0 then
+				local okd, cmd = pcall(function()
+					return HttpService:JSONDecode(res.Body)
+				end)
+				if okd and cmd and cmd.id then
+					local handler = handlers[cmd.action]
+					local result, err
+					if handler then
+						local ok2, r = pcall(handler, cmd.args or {})
+						if ok2 then
+							result = r
+						else
+							err = tostring(r) .. "\n" .. tostring(debug.traceback("", 2))
+						end
+					else
+						err = "unknown action: " .. tostring(cmd.action)
+					end
+					post("/result", { id = cmd.id, ok = (err == nil), result = result, error = err })
+				elseif not okd then
+					-- A command we can't decode still needs an answer, else the server
+					-- waits on it forever. Report it so the tool gets a real error.
+					post("/result", { ok = false, error = "plugin could not decode command: " .. tostring(res.Body) })
+				end
+			else
+				-- Empty long-poll timeout: nothing to do, loop immediately for the next poll.
+				-- (Tiny yield so a server that answers instantly with "" can't make a hot loop.)
+				task.wait(0.1)
+			end
+		else
+			-- Server down: re-seed config the next time it answers (its in-memory config
+			-- died with the process), then back off exponentially to avoid hammering.
+			configPushed = false
+			task.wait(backoff)
+			backoff = math.min(backoff * 2, 10)
 		end
 	end
 end)
@@ -5103,6 +5231,7 @@ if okWidget and widget then
 	field("creatorType", "Creator type (User/Group)")
 	field("comfyUrl", "ComfyUI server URL (http://ip:8188)")
 	field("hunyuanUrl", "Hunyuan3D endpoint (optional)")
+	field("bridgeToken", "Bridge token (match server BRIDGE_TOKEN)")
 	lbl("BUILD MODES", Color3.fromRGB(120, 200, 255), 22)
 	toggleBtn("primitives", "Primitives (lightweight)", true)
 	toggleBtn("officialGen", "Official AI gen (mesh/proc)", true)
@@ -5121,9 +5250,15 @@ if okWidget and widget then
 	end
 	local saveBtn = mkBtn("Save", Color3.fromRGB(70, 150, 235), 0)
 	local testBtn = mkBtn("Test", Color3.fromRGB(60, 64, 72), 0.5)
+	-- bridgeToken is bridge AUTH, matched between server + plugin — it must NOT be pushed
+	-- to /config (that would send the secret over the very channel it protects). It lives
+	-- only in plugin:SetSetting on each side.
+	local LOCAL_ONLY = { bridgeToken = true }
 	local function gather()
 		local cfg = { modes = {} }
-		for k, b in pairs(boxes) do cfg[k] = b.Text end
+		for k, b in pairs(boxes) do
+			if not LOCAL_ONLY[k] then cfg[k] = b.Text end
+		end
 		for k, getter in pairs(toggles) do cfg.modes[k] = getter() end
 		return cfg
 	end
