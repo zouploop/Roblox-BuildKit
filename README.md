@@ -25,11 +25,10 @@ Agent ──stdio──► MCP server ──HTTP long-poll──► BuildKitPlug
 | Tool | What it does |
 |------|--------------|
 | `rbx_frame` | **Primary capture path.** Compute `camera_position` + `look_at_position` framing a target's bbox, without moving the camera — feed the coords to the official `screen_capture`. |
-| `rbx_capture` | OS-window-grab fallback: frame a target (view: front/back/left/right/iso/top), optional roof/Y cutaway, screenshot. Needs Studio in the foreground. |
+| `rbx_capture` | Screenshot with scene setup (cutaway / isolate / annotate / contrast) applied **and guaranteed torn down** around it. Needs Studio in the foreground. |
 | `rbx_floor_plan` | Top-down capture with everything above `ceilingY` hidden (interior layout). |
-| `rbx_montage` | Front/back/left/right/top + iso in one contact sheet (OS-grab fallback). |
-| `rbx_orbit` | Turntable of N evenly-spaced labeled views around a target (OS-grab fallback). |
-| `rbx_watch` | Burst of window grabs over time → labeled sequence, a poor-man's live feed for watching motion/physics. |
+| `rbx_orbit` | Turntable of N evenly-spaced labeled views in one call — batches angles that would otherwise be 2 calls each. |
+| `rbx_watch` | Samples the viewport on a timer **inside one call** → labeled sequence. The only way to watch motion faster than your own round trips. |
 | `rbx_describe` | Compact JSON scene readback: name/class/bbox per node + part props (anchored/material/color). |
 | `rbx_find` | Search the scene: name substring, `className` (IsA), CollectionService tag, attribute, or proximity. |
 | `rbx_inspect` | Bounding-box center/size, part count, immediate children of a target. |
