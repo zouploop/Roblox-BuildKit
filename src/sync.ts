@@ -1,7 +1,6 @@
 // Disk -> DataModel path mapping for rbx_sync.
-// The project uses Rojo-style service-named top folders (no
-// default.project.json), so we derive the target purely from the first
-// path segment that names a Roblox service, plus Rojo file conventions:
+// The target is derived from the first path segment that names a Roblox
+// service, plus file-name conventions:
 //   foo.luau         -> ModuleScript "foo"
 //   foo.server.luau  -> Script "foo"
 //   foo.client.luau  -> LocalScript "foo"
@@ -21,7 +20,7 @@ for (const s of [
   SERVICES[s.toLowerCase()] = s;
 }
 
-// On-disk service folders that Rojo nests one level deeper in the DataModel.
+// Service folders that nest one level deeper in the DataModel.
 function expandService(service: string): string[] {
   if (service === "StarterPlayerScripts") return ["StarterPlayer", "StarterPlayerScripts"];
   if (service === "StarterCharacterScripts") return ["StarterPlayer", "StarterCharacterScripts"];

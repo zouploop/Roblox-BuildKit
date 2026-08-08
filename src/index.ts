@@ -1220,11 +1220,11 @@ server.registerTool(
   }
 );
 
-// --- sync: push disk .luau file(s) into Studio (deterministic Rojo top-up) ----
-// Rojo syncs EDITS to existing files but new .luau often don't auto-create in
-// Studio mid-session, so require(WaitForChild) silently infinite-yields. This
-// reads the file(s) off disk, maps each to its DataModel path from the
-// service-named ancestor folder, and creates/updates the script in one undo step.
+// --- sync: push disk .luau file(s) into Studio ---
+// A new .luau added mid-session often doesn't appear in Studio on its own, so
+// require(WaitForChild) silently infinite-yields. This reads the file(s) off
+// disk, maps each to its DataModel path from the service-named ancestor
+// folder, and creates/updates the script in one undo step.
 async function expandLuauPaths(paths: string[]): Promise<string[]> {
   const out: string[] = [];
   for (const p of paths) {
@@ -1261,8 +1261,8 @@ server.registerTool(
   {
     title: "Sync disk script(s) into Studio",
     description:
-      "Push one or more on-disk .luau files into the running Studio's DataModel — the deterministic fix for 'I edited/added a file but Rojo didn't create it in Studio' (new files that make require(WaitForChild) hang). " +
-      "Each file's target is derived from its Rojo service-named ancestor folder (ServerScriptService/, ReplicatedStorage/, StarterPlayerScripts/, …) plus suffix: .server.luau→Script, .client.luau→LocalScript, .luau→ModuleScript, init.luau→the parent folder. " +
+      "Push one or more on-disk .luau files into the running Studio's DataModel — the deterministic fix for 'I edited/added a file but it didn't appear in Studio' (new files that make require(WaitForChild) hang). " +
+      "Each file's target is derived from its service-named ancestor folder (ServerScriptService/, ReplicatedStorage/, StarterPlayerScripts/, …) plus suffix: .server.luau→Script, .client.luau→LocalScript, .luau→ModuleScript, init.luau→the parent folder. " +
       "Missing parent Folders are auto-created; existing scripts get their Source updated (a wrong-class instance is replaced, children preserved). One undo step. Pass a DIRECTORY to sync every .luau under it.",
     inputSchema: {
       paths: z.array(z.string()).min(1).describe("Absolute file paths and/or directories (a dir recurses for *.luau)."),
