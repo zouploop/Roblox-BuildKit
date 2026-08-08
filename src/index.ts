@@ -43,12 +43,12 @@ const VIEWS = ["front", "back", "left", "right", "iso", "top"] as const;
 server.registerTool(
   "rbx_capture",
   {
-    title: "Capture framed view (OS-grab FALLBACK)",
+    title: "Capture with scene setup (atomic)",
     description:
-      "FALLBACK capture only — PREFER rbx_frame + the official mcp__Roblox_Studio__screen_capture, which works even when Studio is backgrounded/minimized. " +
-      "This OS window-grab needs Studio to be the VISIBLE FOREGROUND window (it reads screen pixels; it'll grab the wrong window or get cropped if Studio is hidden) and pops Studio to the front. " +
-      "Frame a target (by name; omit for whole workspace) from its bbox and screenshot the Studio window. " +
-      "Optionally cut away parts above a Y plane (cutawayY) or the top of the model (cutaway='roof'); isolate/annotate/contrast as needed.",
+      "One shot with scene setup APPLIED AND UNDONE around it, whatever happens — cutaway above a Y plane (cutawayY) or the model top (cutaway='roof'), isolate, annotate, contrast. " +
+      "That teardown is the reason to use this: doing it by hand is rbx_isolate(on) -> rbx_frame -> screen_capture -> rbx_isolate(off), and anything that interrupts you between the last two leaves the scene hidden or recolored. " +
+      "For a PLAIN screenshot with no setup, prefer rbx_frame + the official mcp__Roblox_Studio__screen_capture: cleaner (no Studio chrome) and works when Studio is backgrounded. " +
+      "This grabs the OS window, so Studio must be the visible foreground window, and it pops Studio to the front.",
     inputSchema: {
       target: z.string().optional().describe("Instance name to frame (searched recursively). Omit = whole workspace."),
       view: z.enum(VIEWS).optional().describe("Camera angle. Default 'iso'."),
@@ -124,7 +124,7 @@ server.registerTool(
       saved = await bridge.sendCommand("save_camera").catch(() => null);
       // Only frame (which forces CameraType=Scriptable) if save_camera succeeded — else the
       // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays
-      // frozen. Matches the gate in rbx_montage / rbx_orbit / rbx_watch.
+      // frozen. Matches the gate in rbx_orbit / rbx_watch.
       if (!saved) {
         return textResult(
           "rbx_floor_plan: save_camera failed — skipping the shot to avoid locking the Edit camera. " +
@@ -143,56 +143,20 @@ server.registerTool(
   }
 );
 
-// --- montage: front/back/left/right/top + iso in one call --------------------
-server.registerTool(
-  "rbx_montage",
-  {
-    title: "Montage (6 views, OS-grab FALLBACK)",
-    description:
-      "FALLBACK — needs Studio visible in the foreground (OS window-grab). PREFER the official screen_capture: loop the 6 views through rbx_frame(view) → screen_capture. " +
-      "Auto-frame a target's bbox and return front, back, left, right, top + iso in one call. Useful for a generated mesh's orientation. Restores the camera afterward.",
-    inputSchema: {
-      target: z.string().optional().describe("Instance name to frame (searched recursively). Omit = whole workspace."),
-      zoom: z.number().optional().describe("Fit multiplier; >1 zooms out. Default 1.1."),
-    },
-  },
-  async (a) => {
-    const order = ["front", "back", "left", "right", "top", "iso"] as const;
-    const saved = await bridge.sendCommand("save_camera").catch(() => null);
-    // Only frame (which forces CameraType=Scriptable) if save_camera succeeded — else the
-    // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays frozen.
-    if (!saved) return textResult("rbx_montage: save_camera failed — skipping to avoid locking the Edit camera. Bring Studio to the foreground and retry.");
-    try {
-      const content: any[] = [];
-      for (const view of order) {
-        try {
-          await bridge.sendCommand("frame", { target: a.target, view, zoom: a.zoom ?? 1.1 });
-          const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
-          content.push({ type: "text" as const, text: `--- ${view} ---` });
-          content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
-        } catch (e) {
-          content.push({ type: "text" as const, text: `${view}: ERROR ${e instanceof Error ? e.message : String(e)}` });
-        }
-      }
-      content.unshift({ type: "text" as const, text: `montage of ${a.target ?? "workspace"} (front/back/left/right/top/iso)` });
-      return { content };
-    } catch (e) {
-      return errResult(e);
-    } finally {
-      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
-    }
-  }
-);
+// rbx_montage (fixed front/back/left/right/top+iso contact sheet) lived here. It was
+// subsumed by rbx_orbit, which does the same job with arbitrary angles — rbx_orbit(n:4,
+// top:true) is the same six views — while also labelling each frame. Two tools for one
+// capability cost manifest tokens on every turn and made the choice between them noise.
 
 // --- orbit: turntable contact sheet (pseudo-3D) ------------------------------
 server.registerTool(
   "rbx_orbit",
   {
-    title: "Orbit turntable (OS-grab FALLBACK)",
+    title: "Orbit turntable (N angles, one call)",
     description:
-      "FALLBACK — OS window-grab, needs Studio visible in the foreground. PREFER the official screen_capture: loop azimuths through rbx_frame(azimuth,elevation) → screen_capture for a clean turntable. " +
-      "Capture N evenly-spaced views orbiting a target at a fixed elevation (+ optional top/bottom), each frame LABELED with its azimuth/elevation, as ONE contact sheet. " +
-      "Best input for visualizing a build in pseudo-3D — even spacing + labels let the views fuse into one volume. Pair with rbx_describe. Restores the camera after.",
+      "N evenly-spaced views orbiting a target at a fixed elevation (+ optional top/bottom), each frame LABELED with its azimuth/elevation, as ONE contact sheet — even spacing plus labels let the views fuse into a single volume. " +
+      "Use it to batch angles: n=12 here is one call instead of 24 (rbx_frame -> screen_capture per angle). n=4 with top:true is the old rbx_montage. Pair with rbx_describe. Restores the camera after. " +
+      "Trade-off: this grabs the OS window (Studio must be the visible foreground window) so frames include Studio chrome. For a FEW high-quality angles, loop rbx_frame(azimuth,elevation) -> the official screen_capture instead.",
     inputSchema: {
       target: z.string().optional().describe("Instance to orbit (recursive). Omit = whole workspace."),
       n: z.number().optional().describe("Evenly-spaced orbit angles. Default 8 (try 12 for detail; capped 24)."),
@@ -573,7 +537,7 @@ server.registerTool(
       "THE primary capture path. Compute camera_position + look_at_position framing a target's bbox, WITHOUT moving the camera, then feed them to the " +
       "official mcp__Roblox_Studio__screen_capture — a clean chrome-free shot that works even when Studio is BACKGROUNDED or MINIMIZED. " +
       "Use a named `view`, OR `azimuth`/`elevation` (degrees) for any angle — loop azimuths for a turntable, calling screen_capture each. " +
-      "Prefer this over rbx_capture/montage/orbit (those OS window-grabs are a FALLBACK that needs Studio visible in the foreground).",
+      "Prefer this for a plain screenshot; reach for rbx_capture/rbx_orbit only for what they add (guaranteed cleanup, batched angles).",
     inputSchema: {
       target: z.string().optional().describe("Instance name to frame (recursive). Omit = whole workspace."),
       view: z.enum(VIEWS).optional().describe("Named camera angle. Default 'iso'. (Ignored if azimuth/elevation given.)"),
@@ -640,7 +604,7 @@ server.registerTool(
       "Geometric lint you can't eyeball: unanchored parts, duplicate-placed parts (same pos+size), deep interpenetrations, " +
       "Z-FIGHTS (coplanar/overlapping surfaces fighting over depth → the flicker), UNJOINED ASSEMBLY PIECES (a drawer front split from its tray, " +
       "a handle off its panel → 'X splits into N groups'), and part-budget warnings, plus the overall bounding box. " +
-      "Pair with rbx_montage / rbx_floor_plan (or rbx_frame + screen_capture) for the visual side of QA. " +
+      "Pair with rbx_orbit / rbx_floor_plan (or rbx_frame + screen_capture) for the visual side of QA. " +
       "fix=true auto-nudges each z-fighting part 0.06 off the shared plane (one undo step) — re-run to confirm. " +
       "fit=true adds the CROSS-ASSEMBLY fit check: pieces from DIFFERENT sub-models whose faces nearly meet but leave a visible slot " +
       "(a leg short of the floor, a panel not meeting its frame, a drawer front not filling its opening) — the gaps assemblyGaps can't see because it only looks WITHIN one model. " +
@@ -1338,10 +1302,11 @@ server.registerTool(
 server.registerTool(
   "rbx_watch",
   {
-    title: "Watch (live-feed burst, OS-grab)",
+    title: "Watch motion over time (sampled burst)",
     description:
-      "Grab the Studio window repeatedly over a span of time and return the frames as ONE labeled sequence (t=0.0s, t=0.5s, …) — a poor-man's live camera feed for WATCHING motion: NPCs walking, physics settling, a tween playing, play-mode action. " +
-      "OS window-grab (like rbx_capture): needs Studio VISIBLE in the foreground. If Studio/BuildKit isn't detected (or every grab fails), it returns a fallback directive — switch to looping rbx_frame -> the official screen_capture, or ask the user to open Studio. " +
+      "THE tool for watching something MOVE: samples the viewport on a timer inside a single call and returns the frames as one labeled sequence (t=0.0s, t=0.5s, …) — NPCs walking, physics settling, a tween playing, play-mode action. " +
+      "Nothing else can do this. Looping rbx_frame -> screen_capture samples at the speed of your own round trips (seconds apart at best), so fast motion is simply invisible to it; this loop runs server-side at ~1s intervals. " +
+      "Grabs the OS window, so Studio must be VISIBLE in the foreground. If Studio/BuildKit isn't detected (or every grab fails), it returns a fallback directive — switch to looping rbx_frame -> the official screen_capture, or ask the user to open Studio. " +
       "Give `target` to frame it once and hold the camera steady (motion reads against a fixed view), or `follow:true` to re-frame each shot and track a mover. In Play mode pass play:true to just grab the running game's own camera.",
     inputSchema: {
       seconds: z.number().optional().describe("Total span to watch. Default 5 (capped so frames ≤ 40)."),
