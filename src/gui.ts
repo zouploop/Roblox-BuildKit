@@ -66,8 +66,16 @@ const rgb = z.array(z.number()).length(3);
 
 // One styled-component node. Plugin interprets the props per `type`; .passthrough()
 // keeps any extra props the plugin understands. Recursive via z.lazy for children.
+//
+// The lazy getter is MEMOIZED, which is load-bearing for prompt size rather than speed.
+// z.lazy() runs its factory on every access, so an un-memoized version handed a fresh
+// object to each reference — and zod-to-json-schema, which dedupes by instance, emitted
+// the whole 32-property node TWICE (once for `root`, once for `children.items`) before
+// finally $ref-ing at depth 3. Returning one instance collapses that to a single
+// definition plus a $ref, halving this tool's schema. Same validation either way.
+let nodeSchema: z.ZodTypeAny | undefined;
 export const guiNode: z.ZodType<any> = z.lazy(() =>
-  z
+  (nodeSchema ??= z
     .object({
       type: z.enum([
         "panel", "label", "button", "bar", "list", "grid", "icon", "input", "divider", "spacer",
@@ -104,7 +112,7 @@ export const guiNode: z.ZodType<any> = z.lazy(() =>
       button: z.boolean().optional().describe("icon: make it an ImageButton"),
       children: z.array(guiNode).optional(),
     })
-    .passthrough()
+    .passthrough())
 );
 
 // --- normalize ---------------------------------------------------------------

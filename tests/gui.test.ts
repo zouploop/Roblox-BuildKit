@@ -2,9 +2,46 @@
 // plugin receives, and it deliberately never throws — an unknown theme silently falls
 // back to noir. That makes the fallback behaviour worth pinning down explicitly.
 import { describe, it, expect } from "vitest";
-import { normalizeGuiSpec, THEME_PRESETS, THEME_NAMES } from "../src/gui.js";
+import { normalizeGuiSpec, guiNode, THEME_PRESETS, THEME_NAMES } from "../src/gui.js";
 
 const root = { type: "panel" as const };
+
+describe("guiNode schema", () => {
+  it("validates a tree nested several levels deep", () => {
+    // The node schema is recursive through a memoized z.lazy. These cases exist because
+    // that memoization is what lets zod-to-json-schema emit the node once and $ref it
+    // rather than inlining a second full copy — recursion must keep working regardless.
+    const tree = {
+      type: "panel",
+      title: "Stats",
+      children: [
+        { type: "list", children: [{ type: "label", text: "HP" }, { type: "bar", value: 0.5 }] },
+        { type: "grid", cellSize: "40,40", children: [{ type: "icon", image: "123" }] },
+      ],
+    };
+    expect(() => guiNode.parse(tree)).not.toThrow();
+  });
+
+  it("rejects an unknown component type at any depth", () => {
+    expect(() => guiNode.parse({ type: "hologram" })).toThrow();
+    expect(() =>
+      guiNode.parse({ type: "panel", children: [{ type: "panel", children: [{ type: "hologram" }] }] })
+    ).toThrow();
+  });
+
+  it("keeps unknown props via passthrough (the plugin may understand more than we model)", () => {
+    const parsed = guiNode.parse({ type: "label", text: "hi", someFuturePlugin: true }) as any;
+    expect(parsed.someFuturePlugin).toBe(true);
+  });
+
+  it("resolves to a single shared instance", () => {
+    // Directly pins the memoization: two accesses of the lazy must yield the same object,
+    // or the emitted JSON schema silently doubles again.
+    const a = (guiNode as any)._def.getter();
+    const b = (guiNode as any)._def.getter();
+    expect(a).toBe(b);
+  });
+});
 
 describe("normalizeGuiSpec", () => {
   it("defaults to the noir preset when no theme is given", () => {
