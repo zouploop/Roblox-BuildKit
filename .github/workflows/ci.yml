@@ -26,11 +26,14 @@ jobs:
         run: npm audit --audit-level=moderate
       # The .rbxmx is generated from the plugin source but also tracked, so it can drift
       # if someone edits the .luau and commits without building. Regenerate and diff.
+      # Uses bash explicitly: the previous `\`-continuation was interpreted literally by
+      # PowerShell on the Windows leg (git saw the path as "\/BuildKitPlugin.rbxmx").
       - name: Check the committed plugin artifact matches its source
+        shell: bash
         run: |
           node scripts/gen-rbxmx.mjs
           git diff --exit-code -- plugin/BuildKitPlugin.rbxmx \
-            || (echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result" && exit 1)
+            || { echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result"; exit 1; }
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
   # headless binary, so this runs fine without Studio. The 5k-line --!nocheck file has a
@@ -42,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Selene
         run: |
-          curl -sL https://github.com/Kampfkarren/selene/releases/latest/download/selene-x86_64-unknown-linux-gnu.zip -o selene.zip
+          curl -sL https://github.com/Kampfkarren/selene/releases/download/0.31.0/selene-0.31.0-linux.zip -o selene.zip
           unzip -o selene.zip
           sudo mv selene /usr/local/bin/
       - name: Lint the Luau plugin

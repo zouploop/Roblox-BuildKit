@@ -16,6 +16,14 @@ local BASE = "http://127.0.0.1:44760"
 local PLACE = tostring(game.Name)
 local RUNNING = true
 
+-- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
+-- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
+-- When set, the plugin sends it on every request AND only auto-pushes config after a
+-- poll answers X-BuildKit-Auth: ok — so secrets never go to an unverified listener.
+-- Declared here (top of the chunk) because runtime_install, far below, bakes it into
+-- the embedded runtime harness.
+local BRIDGE_TOKEN = tostring(plugin:GetSetting("bk_bridgeToken") or "")
+
 -- Source for the LAST-RESORT in-game runtime harness (rbx_runtime install drops
 -- this as a Script into ServerScriptService so it runs during Play). Polls the
 -- bridge with ctx=runtime and runs rbx_run code via loadstring. Prefer the official
@@ -5038,7 +5046,8 @@ end
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
 -- When set, the plugin sends it on every request AND only auto-pushes config after a
 -- poll answers X-BuildKit-Auth: ok — so secrets never go to an unverified listener.
-local BRIDGE_TOKEN = tostring(plugin:GetSetting("bk_bridgeToken") or "")
+-- (BRIDGE_TOKEN itself is declared at the top of the chunk; reqHeaders is scoped here
+-- because only the poll loop + settings panel need it.)
 local function reqHeaders()
 	local h = { ["Content-Type"] = "application/json" }
 	if BRIDGE_TOKEN ~= "" then

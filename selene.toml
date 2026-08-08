@@ -4,15 +4,9 @@
 # Tighten lints (and drop the --!nocheck) as the file gets split into ModuleScripts.
 std = "roblox"
 
-# Globals the plugin legitimately references (plugin/Studio environment), so global_usage
-# doesn't flag every line.
-globals = ["plugin", "game", "workspace", "task", "print", "warn", "error", "require", "typeof"]
-
 [lints]
-# Style nits that are loud on legacy code — allow until the file is cleaned up.
 complexity = "allow"
 shadow = "allow"
 unused_variable = "allow"
 unused_self = "allow"
-# Stylistic only; the plugin prefers short-circuit idioms.
 if_same_then_else = "allow"
