@@ -10,7 +10,12 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const src = path.resolve(dir, "..", "plugin", "BuildKitPlugin.luau");
 const out = path.resolve(dir, "..", "plugin", "BuildKitPlugin.rbxmx");
 
-const luau = readFileSync(src, "utf8");
+// Normalize to LF before embedding. The .rbxmx is a tracked artifact, so it must be a
+// deterministic function of the source alone — otherwise a Windows checkout (CRLF) and a
+// Linux one (LF) generate byte-different files from identical source, and CI's
+// "is the committed artifact stale?" check fails for whichever platform didn't build it.
+// Studio reads either, so LF is a free choice.
+const luau = readFileSync(src, "utf8").replace(/\r\n/g, "\n");
 if (luau.includes("]]>")) {
   throw new Error("source contains ']]>' which breaks the CDATA wrapper");
 }
