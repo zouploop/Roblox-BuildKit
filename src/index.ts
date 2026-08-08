@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // roblox-buildkit MCP server.
 // Pairs with BuildKitPlugin (Luau) running in Studio: this process queues
 // commands the plugin executes in the Edit datamodel, and screenshots the
@@ -41,6 +40,14 @@ function errResult(e: unknown) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
+// RGB [r,g,b] as 0-255 bytes — the format the plugin's Color3.fromRGB expects and the
+// manifest documents. Enforced here so a caller can't silently drift past the documented
+// range (the plugin clamps, but the contract should match the docs).
+const rgb255 = z.array(z.number().min(0).max(255)).length(3);
+// Documented result caps (mirror of the plugin's clamps) so the manifest and the wire
+// contract agree.
+const cap = (max: number) => z.number().int().min(1).max(max);
+
 // Short timeout for scene-teardown calls. The plugin was already proven alive at
 // save_camera, so on the failure path (plugin died mid-capture) a full 30s wait per
 // restore would turn one failed capture into a multi-minute hang. Run them in parallel
@@ -55,6 +62,11 @@ async function teardown(ops: ({ action: string; args?: any } | null)[]) {
 // so a frame that stalls is a dead plugin — fail each shot fast instead of eating the
 // default 30s for every one of up to 24 shots.
 const FRAME_MS = 12_000;
+// Screenshot with the active place filter threaded through, so capture.ps1 picks the
+// right Studio window when several are open (matches the bridge's command routing).
+function shot(viewport?: any) {
+  return captureWindow(CAPTURE_PS1, viewport, bridge.getActivePlace() ?? undefined);
+}
 
 const server = new McpServer({ name: "roblox-buildkit", version: SERVER_VERSION });
 
@@ -110,7 +122,7 @@ server.registerTool(
       }
       saved = await bridge.sendCommand("save_camera");
       const framed = await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 });
-      const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
+      const b64 = await shot(saved?.viewport);
       const tags = `${a.isolate ? " [isolated]" : ""}${a.annotate ? " [annotated]" : ""}${a.contrast ? " [contrast]" : ""}`;
       return imageResult(b64, `framed ${a.target ?? "workspace"} view=${a.view ?? "iso"} size=${JSON.stringify(framed?.size)}${tags}`);
     } catch (e) {
@@ -160,7 +172,7 @@ server.registerTool(
         );
       }
       await bridge.sendCommand("frame", { target: a.target, view: "top", zoom: a.zoom ?? 1.05 });
-      const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
+      const b64 = await shot(saved?.viewport);
       return imageResult(b64, `floor plan of ${a.target} (hid ${cut?.hiddenCount} parts above y=${a.ceilingY})`);
     } catch (e) {
       return errResult(e);
@@ -233,7 +245,7 @@ server.registerTool(
       for (const s of shots) {
         try {
           await bridge.sendCommand("frame_dir", { target: a.target, azimuth: s.az, elevation: s.el, zoom }, FRAME_MS);
-          const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
+          const b64 = await shot(saved?.viewport);
           content.push({ type: "text" as const, text: `--- ${s.label} ---` });
           content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
         } catch (e) {
@@ -289,7 +301,7 @@ export const BUILD_SPEC = z
             pos: z.array(z.number()).length(3).optional().describe("[x,y,z] offset from center. Default [0,0,0]."),
             size: z.array(z.number()).length(3),
             rot: z.array(z.number()).length(3).optional().describe("[rx,ry,rz] degrees."),
-            color: z.array(z.number()).length(3).optional(),
+            color: rgb255.optional(),
             material: z.string().optional(),
             transparency: z.number().optional(),
             neon: z.boolean().optional().describe("Material=Neon (glows)."),
@@ -298,7 +310,7 @@ export const BUILD_SPEC = z
             name: z.string().optional(),
             light: z
               .object({
-                color: z.array(z.number()).length(3).optional(),
+                color: rgb255.optional(),
                 brightness: z.number().optional(),
                 range: z.number().optional(),
               })
@@ -311,7 +323,7 @@ export const BUILD_SPEC = z
                 z
                   .object({
                     preset: z.enum(["fire", "smoke", "magic", "energy", "sparkle"]).optional(),
-                    color: z.array(z.number()).length(3).optional().describe("[r,g,b] flat tint override."),
+                    color: rgb255.optional().describe("[r,g,b] flat tint override."),
                     rate: z.number().optional(),
                     speed: z.number().optional(),
                     size: z.number().optional().describe("multiplier on particle size."),
@@ -344,18 +356,18 @@ export const BUILD_SPEC = z
     drawers: z.number().optional().describe("nightstand: drawer count (default 2)."),
     columns: z.number().optional().describe("dresser: drawer columns (default 2)."),
     rows: z.number().optional().describe("dresser: drawer rows per column (default 3)."),
-    cushionColor: z.array(z.number()).length(3).optional().describe("sofa/armchair: [r,g,b] cushion color."),
-    cooktopColor: z.array(z.number()).length(3).optional().describe("stove: [r,g,b] cooktop color."),
+    cushionColor: rgb255.optional().describe("sofa/armchair: [r,g,b] cushion color."),
+    cooktopColor: rgb255.optional().describe("stove: [r,g,b] cooktop color."),
     style: z.string().optional().describe("cabinet: 'shaker' for frame+panel doors (else flat)."),
     shelves: z.number().optional().describe("shelf: number of shelf boards; also fridge interior shelf count (default 3). Cabinet door sections use per-section `shelves`."),
-    panelColor: z.array(z.number()).length(3).optional().describe("cabinet shaker: [r,g,b] door panel color."),
-    mattressColor: z.array(z.number()).length(3).optional().describe("bed: [r,g,b] mattress color."),
+    panelColor: rgb255.optional().describe("cabinet shaker: [r,g,b] door panel color."),
+    mattressColor: rgb255.optional().describe("bed: [r,g,b] mattress color."),
     name: z.string().optional(),
     center: z.array(z.number()).length(3).describe("[x,y,z] center of the volume (prop: the origin parts offset from)."),
     size: z.array(z.number()).length(3).optional().describe("[width,height,depth]. Required for all kinds except 'prop' (which uses per-part sizes)."),
     thickness: z.number().optional().describe("Wall/slab thickness (cabinet: carcass panel thickness, default 0.4)."),
     material: z.string().optional().describe("Roblox Material enum name, e.g. Brick, Concrete, WoodPlanks."),
-    color: z.array(z.number()).length(3).optional().describe("[r,g,b] 0-255."),
+    color: rgb255.optional().describe("[r,g,b] 0-255."),
     parent: z.string().optional().describe("Name of an existing model to parent into; else a new model in workspace."),
     front: z
       .array(
@@ -385,7 +397,7 @@ export const BUILD_SPEC = z
         depth: z.number().optional(),
         offset: z.number().optional().describe("x offset of the basin from cabinet center."),
         basinDepth: z.number().optional(),
-        basinColor: z.array(z.number()).length(3).optional(),
+        basinColor: rgb255.optional(),
         faucet: z.boolean().optional().describe("default true."),
         apron: z.boolean().optional().describe("farmhouse apron sink: a big exposed white basin front flush at the cabinet face (hero element)."),
       })
@@ -393,8 +405,8 @@ export const BUILD_SPEC = z
       .describe(
         "cabinet+countertop: cut a basin hole THROUGH the counter + carcass top and drop in a sink (basin walls/bottom + gooseneck faucet) so it isn't capped by counter blocks. width/depth in studs (default ~55% inner width × D-1.2). Put doors (or nothing), not drawers, in the section under the sink."
       ),
-    hardwareColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for pulls/knobs (default aged brass)."),
-    interiorColor: z.array(z.number()).length(3).optional().describe("cabinet: [r,g,b] for drawer trays/interior."),
+    hardwareColor: rgb255.optional().describe("cabinet: [r,g,b] for pulls/knobs (default aged brass)."),
+    interiorColor: rgb255.optional().describe("cabinet: [r,g,b] for drawer trays/interior."),
     door: z
       .object({ wall: z.enum(["front", "back", "left", "right"]), width: z.number(), height: z.number() })
       .optional(),
@@ -497,7 +509,7 @@ server.registerTool(
     try {
       const spec = normalizeGuiSpec(a as any);
       const res = await bridge.sendCommand("build_gui", spec, 60_000);
-      const b64 = await captureWindow(CAPTURE_PS1, res?.viewport);
+      const b64 = await shot(res?.viewport);
       return imageResult(
         b64,
         `built GUI "${res?.name}" theme=${spec.themeName} enabled=${res?.enabled} (real in StarterGui, edit-preview in CoreGui). ` +
@@ -527,7 +539,7 @@ server.registerTool(
     try {
       const res = await bridge.sendCommand("gui_preview", { name: a.name, mode: a.mode });
       if (a.mode === "on") {
-        const b64 = await captureWindow(CAPTURE_PS1, res?.viewport);
+        const b64 = await shot(res?.viewport);
         return imageResult(b64, `preview ON for "${a.name}"`);
       }
       return textResult({ name: a.name, preview: "off", cleared: res?.cleared ?? 0 });
@@ -605,7 +617,7 @@ server.registerTool(
       to: z.array(z.number()).length(3).optional().describe("move: absolute [x,y,z] target for the bbox center."),
       degrees: z.array(z.number()).length(3).optional().describe("rotate: [x,y,z] degrees about bbox center."),
       scale: z.union([z.number(), z.array(z.number()).length(3)]).optional().describe("scale: factor (model) or factor/[x,y,z] (part)."),
-      color: z.array(z.number()).length(3).optional().describe("recolor: [r,g,b] 0-255."),
+      color: rgb255.optional().describe("recolor: [r,g,b] 0-255."),
       material: z.string().optional().describe("material: Roblox Material enum name."),
       name: z.string().optional().describe("rename: new name; clone: name for the copy."),
       offset: z.array(z.number()).length(3).optional().describe("clone: [dx,dy,dz] world offset for the copy."),
@@ -732,7 +744,7 @@ server.registerTool(
       "VERIFY a build/edit in text without spending a screenshot — only capture when geometry is genuinely ambiguous.",
     inputSchema: {
       target: z.string().optional().describe("Instance name (recursive). Omit = whole workspace."),
-      depth: z.number().optional().describe("Child recursion depth 0-4. Default 1."),
+      depth: z.number().int().min(0).max(4).optional().describe("Child recursion depth 0-4. Default 1."),
     },
   },
   async (a) => {
@@ -813,7 +825,7 @@ server.registerTool(
         .optional()
         .describe("Proximity: within radius of a [x,y,z] point or another instance's bbox center."),
       root: z.string().optional().describe("Limit search under this instance (default whole workspace)."),
-      limit: z.number().optional().describe("Max results (default 50, cap 500)."),
+      limit: cap(500).optional().describe("Max results (default 50, cap 500)."),
     },
   },
   async (a) => {
@@ -841,7 +853,7 @@ server.registerTool(
       size: z.array(z.number()).length(3).optional().describe("box: full size."),
       radius: z.number().optional().describe("sphere: radius."),
       ignore: z.array(z.string()).optional().describe("Instance names to exclude from the cast/overlap."),
-      limit: z.number().optional().describe("box/sphere: max parts (default 50, cap 500)."),
+      limit: cap(500).optional().describe("box/sphere: max parts (default 50, cap 500)."),
     },
   },
   async (a) => {
@@ -866,7 +878,7 @@ server.registerTool(
       query: z.string().optional().describe("find: literal substring to search for."),
       from: z.number().optional().describe("read: first line (1-based)."),
       to: z.number().optional().describe("read: last line."),
-      limit: z.number().optional().describe("find: max matches (default 100, cap 500)."),
+      limit: cap(500).optional().describe("find: max matches (default 100, cap 500)."),
     },
   },
   async (a) => {
@@ -936,7 +948,7 @@ server.registerTool(
     description:
       "Read the Studio output log (LogService) in-channel — prints, warnings, errors — without leaving BuildKit. `errorsOnly` keeps just warnings+errors; `filter` keeps lines containing a substring; `limit` caps the tail (default 50). For PLAY-mode logs the official get_console_output is better; this is the edit-time channel (e.g. see a build script's warnings right after rbx_run/execute_luau).",
     inputSchema: {
-      limit: z.number().optional().describe("Max lines from the tail (default 50, cap 300)."),
+      limit: cap(300).optional().describe("Max lines from the tail (default 50, cap 300)."),
       errorsOnly: z.boolean().optional().describe("Only warnings + errors."),
       filter: z.string().optional().describe("Only lines containing this substring."),
     },
@@ -1369,7 +1381,7 @@ server.registerTool(
     }
     const seconds = Math.max(0.5, a.seconds ?? 5);
     const interval = Math.max(0.25, a.interval ?? 0.5);
-    let frames = Math.floor(seconds / interval) + 1;
+    let frames = Math.floor(seconds / interval + 1e-9) + 1;
     const capped = frames > 40;
     if (capped) frames = 40;
     const moveCam = !a.play && (a.target !== undefined);
@@ -1389,11 +1401,13 @@ server.registerTool(
         `watching ${a.target ?? "current view"} — ${frames} frames every ~${interval}s` +
         `${a.follow ? " (following)" : ""}${capped ? " [capped at 40 frames]" : ""}. OS window-grab: Studio must be the visible foreground window.`;
       const content: any[] = [{ type: "text" as const, text: header }];
+      // Label the time in 100ms steps: (i*interval).toFixed(1) mislabels e.g. 0.25s as "0.3".
+      const fmtT = (i: number) => String(Math.round(i * interval * 100) / 100);
       for (let i = 0; i < frames; i++) {
-        const t = (i * interval).toFixed(1);
+        const t = fmtT(i);
         try {
           if (canMove && a.follow) await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 }, FRAME_MS);
-          const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
+          const b64 = await shot(saved?.viewport);
           content.push({ type: "text" as const, text: `--- t=${t}s ---` });
           content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
           grabbed++;
@@ -1482,6 +1496,18 @@ if (HAS_PIPELINE)
       const env: Record<string, string> = { RBX_KEY: String(key) };
       if (cfg.comfyUrl) env.BK_COMFY_URL = String(cfg.comfyUrl);
       const res = await runPipeline(args, env);
+      // The pipeline's shape is opaque (local script, not in-repo) — guard the deref so a
+      // result that omits a promised field fails with an actionable message instead of a
+      // cryptic "Cannot read properties of undefined".
+      if (!res || typeof res !== "object" || typeof res.name !== "string") {
+        return errResult(new Error(`pipeline returned a malformed result: ${JSON.stringify(res)}`));
+      }
+      if (!res.split && typeof res.assetId !== "number") {
+        return errResult(new Error(`pipeline result missing assetId (split=false): ${JSON.stringify(res)}`));
+      }
+      if (res.split && (typeof res.base?.assetId !== "number" || typeof res.lid?.assetId !== "number")) {
+        return errResult(new Error(`pipeline result missing base/lid assetIds (split=true): ${JSON.stringify(res)}`));
+      }
       const place = a.place ?? [0, (a.size ?? 4) / 2 + 0.5, 0];
       const onErr = (e: unknown) => ({ insertError: e instanceof Error ? e.message : String(e) });
       const inserted = res.split

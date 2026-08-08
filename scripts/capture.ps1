@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory = $true)][string]$Out,
   [string]$ProcName = "RobloxStudioBeta",
   [int]$VpW = 0,   # plugin-reported 3D viewport width  (logical px); 0 = whole window
-  [int]$VpH = 0    # plugin-reported 3D viewport height (logical px)
+  [int]$VpH = 0,   # plugin-reported 3D viewport height (logical px)
+  [string]$Place = ""  # active place filter (rbx_use_place): prefer the Studio window whose title matches
 )
 $ErrorActionPreference = "Stop"
 
@@ -36,8 +37,15 @@ public class WinCap {
 "@
 
 # Find the Studio window by PID (Process.MainWindowHandle is often 0 for Studio).
-$proc = Get-Process -Name $ProcName -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $proc) { throw "Roblox Studio process '$ProcName' not found. Is Studio open?" }
+$procs = @(Get-Process -Name $ProcName -ErrorAction SilentlyContinue)
+if ($procs.Count -eq 0) { throw "Roblox Studio process '$ProcName' not found. Is Studio open?" }
+# With multiple Studios open, prefer the one whose window title contains the active
+# place filter (the bridge routes commands to that same Studio). Fall back to the first.
+$proc = $null
+if ($Place -ne "") {
+  $proc = $procs | Where-Object { $_.MainWindowTitle -like "*$Place*" } | Select-Object -First 1
+}
+if (-not $proc) { $proc = $procs | Select-Object -First 1 }
 $script:spid = [uint32]$proc.Id
 $script:best = [IntPtr]::Zero
 $script:bestScore = -1

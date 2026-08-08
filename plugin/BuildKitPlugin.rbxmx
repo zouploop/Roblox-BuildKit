@@ -5041,6 +5041,25 @@ function handlers.set_lighting(args)
 	end
 end
 
+-- Restore the user's original lighting if a day-mode stash is still active when the
+-- plugin is unloaded/disabled — a session that ends mid-capture otherwise leaves the
+-- place stuck in bright "day" lighting with no way to flip it back.
+local function restoreLightingIfStashed()
+	if lightStash.ClockTime ~= nil then
+		pcall(function()
+			Lighting.ClockTime = lightStash.ClockTime
+			Lighting.Brightness = lightStash.Brightness
+			Lighting.Ambient = lightStash.Ambient
+			Lighting.OutdoorAmbient = lightStash.OutdoorAmbient
+			Lighting.ExposureCompensation = lightStash.ExposureCompensation
+		end)
+		lightStash = {}
+	end
+end
+pcall(function()
+	plugin.Unloading:Connect(restoreLightingIfStashed)
+end)
+
 -- ---------- long-poll loop ---------------------------------------------------
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).

@@ -44,6 +44,16 @@ describe("BUILD_SPEC (shared by rbx_build and rbx_batch)", () => {
     });
     expect(r.success).toBe(false);
   });
+
+  it("rejects a color channel outside 0-255", () => {
+    const r = BUILD_SPEC.safeParse({ kind: "chair", center: [0, 0, 0], size: [1, 2, 3], cushionColor: [300, 0, 0] });
+    expect(r.success).toBe(false);
+  });
+
+  it("accepts 0-255 color bounds", () => {
+    const r = BUILD_SPEC.safeParse({ kind: "chair", center: [0, 0, 0], size: [1, 2, 3], cushionColor: [255, 0, 128] });
+    expect(r.success).toBe(true);
+  });
 });
 
 describe("validateBatchOps", () => {

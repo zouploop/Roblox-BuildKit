@@ -184,7 +184,7 @@ fails if they drift.
 
 ## Notes / limits
 
-- Capture brings Studio to the foreground and grabs the window (CopyFromScreen) — reliable for GPU 3D content, but Studio must not be fully off-screen.
+- Capture brings Studio to the foreground and grabs the window (CopyFromScreen) — reliable for GPU 3D content, but Studio must not be fully off-screen. With several Studios open, set the active place filter (`rbx_use_place`) and the grab targets the matching window.
 - Plugin uses a fixed command vocabulary (no arbitrary Luau eval — plugins can't `loadstring`). Use the official `execute_luau` for ad-hoc code.
 - Port defaults to 44760 (`BUILDKIT_PORT` env to change; must match `BASE` in the plugin).
 - **Optional bridge auth (recommended on a shared machine).** Set `BRIDGE_TOKEN` when starting

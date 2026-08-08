@@ -1,0 +1,18 @@
+# Keep npm dependencies fresh. The audit CI job fails above moderate, so a dependabot
+# PR that introduces an advisory will be caught — but the PR itself is what upgrades us
+# off vulnerable versions in the first place.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      typescript:
+        patterns: ["typescript", "@types/*"]
+      vitest:
+        patterns: ["vitest", "@vitest/*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
