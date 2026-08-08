@@ -93,6 +93,22 @@ export class Bridge {
     });
   }
 
+  // Release the bridge port and fail any in-flight commands. Mainly for tests (so a suite
+  // doesn't leak listeners between cases) and for a clean shutdown; in normal operation the
+  // process just exits, which frees the port anyway. Safe to call when not the owner.
+  async stop(): Promise<void> {
+    for (const [id, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error("bridge stopped"));
+      this.pending.delete(id);
+    }
+    for (const w of this.waiters.splice(0)) w.fn(null);
+    const server = this.server;
+    this.server = undefined;
+    if (!server) return;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
   pluginConnected(): boolean {
     return Date.now() - this.lastSeen < 5000;
   }

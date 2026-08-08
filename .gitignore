@@ -1,7 +1,14 @@
 # Everything is ignored by default; only the plugin, server source, skills, and README are tracked.
 /*
 !/.gitignore
+!/.gitattributes
 !/README.md
+!/.github/
+!/.github/**
+
+!/tests/
+!/tests/**
+!/vitest.config.ts
 
 !/plugin/
 /plugin/*

@@ -6,9 +6,6 @@
 //   foo.client.luau  -> LocalScript "foo"
 //   init.luau (etc.) -> the PARENT folder becomes that script.
 // .lua is accepted alongside .luau.
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 // lowercased service name -> canonical name
 const SERVICES: Record<string, string> = {};
 for (const s of [
@@ -68,23 +65,5 @@ export function mapFile(absPath: string): Mapping | null {
   return { dmPath: expandService(service).concat(containers, [cls.base]), className: cls.className };
 }
 
-// ---- self-check (node dist/sync.js) ----------------------------------------
-function isMain(): boolean {
-  return !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-}
-if (isMain()) {
-  const eq = (got: Mapping | null, want: Mapping | null, label: string) => {
-    const a = JSON.stringify(got), b = JSON.stringify(want);
-    if (a !== b) throw new Error(`FAIL ${label}\n  got  ${a}\n  want ${b}`);
-  };
-  const R = "C:/MockProject";
-  eq(mapFile(`${R}/ServerScriptService/Foo.luau`), { dmPath: ["ServerScriptService", "Foo"], className: "ModuleScript" }, "plain module");
-  eq(mapFile(`${R}/ServerScriptService/Foo.server.luau`), { dmPath: ["ServerScriptService", "Foo"], className: "Script" }, "server script");
-  eq(mapFile(`${R}/StarterPlayerScripts/Hud.client.luau`), { dmPath: ["StarterPlayer", "StarterPlayerScripts", "Hud"], className: "LocalScript" }, "client + StarterPlayer expand");
-  eq(mapFile(`${R}/ReplicatedStorage/Part_Icles/init.luau`), { dmPath: ["ReplicatedStorage", "Part_Icles"], className: "ModuleScript" }, "init -> parent");
-  eq(mapFile(`${R}/ReplicatedStorage/A/B/C.luau`), { dmPath: ["ReplicatedStorage", "A", "B", "C"], className: "ModuleScript" }, "nested folders");
-  eq(mapFile("C:\\MockProject\\ServerStorage\\Bar.server.luau"), { dmPath: ["ServerStorage", "Bar"], className: "Script" }, "backslash path");
-  eq(mapFile("C:/random/place/Foo.luau"), null, "no service -> null");
-  eq(mapFile(`${R}/ServerScriptService/notes.txt`), null, "non-luau -> null");
-  console.log("sync.ts self-check OK (8 cases)");
-}
+// The self-check that used to live here (runnable only as `node dist/sync.js`, so nothing
+// ever ran it) now lives in tests/sync.test.ts, where `npm test` and CI cover it.
