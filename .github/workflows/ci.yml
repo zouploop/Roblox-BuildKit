@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - run: npm test
+      # The .rbxmx is generated from the plugin source but also tracked, so it can drift
+      # if someone edits the .luau and commits without building. Regenerate and diff.
+      - name: Check the committed plugin artifact matches its source
+        run: |
+          node scripts/gen-rbxmx.mjs
+          git diff --exit-code -- plugin/BuildKitPlugin.rbxmx \
+            || (echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result" && exit 1)
