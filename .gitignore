@@ -1,0 +1,32 @@
+# Everything is ignored by default; only the plugin, server source, skills, and README are tracked.
+/*
+!/.gitignore
+!/README.md
+
+!/plugin/
+/plugin/*
+!/plugin/BuildKitPlugin.rbxmx
+!/plugin/BuildKitPlugin.luau
+
+!/src/
+!/src/**
+
+!/scripts/
+!/scripts/**
+
+!/skills/
+!/skills/**
+
+!/images/
+!/images/**
+
+!/package.json
+!/package-lock.json
+!/tsconfig.json
+
+# Build output + local creds
+dist/
+node_modules/
+pipeline/seed_config.json
+graphify-out/
+pipeline/work/
