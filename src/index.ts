@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { readFile, readdir, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { Bridge } from "./bridge.js";
 import { captureWindow } from "./capture.js";
 import { guiNode, normalizeGuiSpec, THEME_NAMES } from "./gui.js";
@@ -111,19 +112,33 @@ server.registerTool(
     },
   },
   async (a) => {
+    // Same single-try/finally discipline as rbx_capture: the cutaway is a scene MUTATION
+    // (parts get Transparency=1), so it must be applied inside the try whose finally undoes
+    // it. It used to sit outside, with save_camera between it and the try — a save_camera
+    // rejection (bridge timeout / plugin not polling) then skipped the finally entirely and
+    // left the scene cut away with the restore token stranded in this dead call.
+    let cut: any = null;
+    let saved: any = null;
     try {
-      const cut = await bridge.sendCommand("cutaway", { target: a.target, y: a.ceilingY });
-      const saved = await bridge.sendCommand("save_camera");
-      try {
-        await bridge.sendCommand("frame", { target: a.target, view: "top", zoom: a.zoom ?? 1.05 });
-        const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
-        return imageResult(b64, `floor plan of ${a.target} (hid ${cut?.hiddenCount} parts above y=${a.ceilingY})`);
-      } finally {
-        await bridge.sendCommand("restore_camera", saved).catch(() => {});
-        await bridge.sendCommand("restore", { token: cut?.token }).catch(() => {});
+      cut = await bridge.sendCommand("cutaway", { target: a.target, y: a.ceilingY });
+      saved = await bridge.sendCommand("save_camera").catch(() => null);
+      // Only frame (which forces CameraType=Scriptable) if save_camera succeeded — else the
+      // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays
+      // frozen. Matches the gate in rbx_montage / rbx_orbit / rbx_watch.
+      if (!saved) {
+        return textResult(
+          "rbx_floor_plan: save_camera failed — skipping the shot to avoid locking the Edit camera. " +
+            "Bring Studio to the foreground and retry."
+        );
       }
+      await bridge.sendCommand("frame", { target: a.target, view: "top", zoom: a.zoom ?? 1.05 });
+      const b64 = await captureWindow(CAPTURE_PS1, saved?.viewport);
+      return imageResult(b64, `floor plan of ${a.target} (hid ${cut?.hiddenCount} parts above y=${a.ceilingY})`);
     } catch (e) {
       return errResult(e);
+    } finally {
+      if (saved) await bridge.sendCommand("restore_camera", saved).catch(() => {});
+      if (cut?.token) await bridge.sendCommand("restore", { token: cut.token }).catch(() => {});
     }
   }
 );
@@ -982,6 +997,26 @@ server.registerTool(
   }
 );
 
+// --- restore: sweep-undo every outstanding hide/recolor ----------------------
+server.registerTool(
+  "rbx_restore",
+  {
+    title: "Restore all hidden / recolored parts",
+    description:
+      "Escape hatch: un-hide and un-recolor EVERY part still affected by a cutaway, isolate, or contrast — no token needed. " +
+      "Use when parts have gone invisible or oddly colored and you don't know which call left them that way (a capture that errored " +
+      "partway, or a previous Studio session). The plugin also runs this automatically on load, so a restart clears any stragglers.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return textResult(await bridge.sendCommand("restore_all", {}, 60_000));
+    } catch (e) {
+      return errResult(e);
+    }
+  }
+);
+
 // --- annotate: overlay bbox outline + dimension label ------------------------
 server.registerTool(
   "rbx_annotate",
@@ -1380,7 +1415,12 @@ server.registerTool(
 );
 
 // --- local-gen pipeline: prompt/image -> mesh -> Roblox asset -> insert ------
+// The pipeline is an OPTIONAL local component (ComfyUI + Hunyuan3D + Blender on your own
+// GPU) and is not part of the repo, so it's absent in a plain clone. rbx_gen_mesh is
+// therefore registered only when the script is actually present — advertising a tool that
+// can only fail costs every session manifest tokens and hands the agent a dead end.
 const PIPELINE_PY = path.resolve(__dirname, "..", "pipeline", "gen_to_roblox.py");
+const HAS_PIPELINE = existsSync(PIPELINE_PY);
 
 function runPipeline(args: string[], env: Record<string, string>): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -1403,7 +1443,8 @@ function runPipeline(args: string[], env: Record<string, string>): Promise<any> 
   });
 }
 
-server.registerTool(
+if (HAS_PIPELINE)
+  server.registerTool(
   "rbx_gen_mesh",
   {
     title: "Generate a 3D mesh and import it to Roblox",
@@ -1456,13 +1497,16 @@ server.registerTool(
       return errResult(e);
     }
   }
-);
+  );
 
 async function main() {
   await bridge.start(PORT);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[buildkit] MCP server ready (stdio)");
+  if (!HAS_PIPELINE) {
+    console.error(`[buildkit] rbx_gen_mesh disabled — no local-gen pipeline at ${PIPELINE_PY}`);
+  }
   // Exit when the MCP host (our stdin peer) goes away, so we don't orphan and
   // squat port 44760 — that EADDRINUSE squat breaks the next client's reconnect.
   process.stdin.on("end", () => process.exit(0));

@@ -39,6 +39,7 @@ Agent ──stdio──► MCP server ──HTTP long-poll──► BuildKitPlug
 | `rbx_navcheck` | PathfindingService walkability check between two points; optional neon path visualization. |
 | `rbx_annotate` | Overlay a bbox outline + W×H×D dimension label on a target. |
 | `rbx_isolate` | Hide everything but a target for one shot. |
+| `rbx_restore` | Escape hatch: un-hide / un-recolor **everything** left over from a cutaway, isolate, or contrast — no token needed. |
 | `rbx_qa` | Geometric lint: unanchored parts, duplicate placement, interpenetration, and more. |
 | `rbx_optimize` | Runtime/streaming audit: part counts, CollisionFidelity, unanchored geometry, StreamingEnabled. |
 
@@ -61,7 +62,7 @@ Agent ──stdio──► MCP server ──HTTP long-poll──► BuildKitPlug
 | `rbx_checkpoint` | Save a hard checkpoint clone; restore it later (one undo step). |
 | `rbx_diff` | Compare two trees/checkpoints — added/removed/changed, keyed by path. |
 | `rbx_undo` | Undo/redo BuildKit mutations (also Ctrl+Z). |
-| `rbx_gen_mesh` | Text prompt or image → local AI mesh → MeshPart inserted into Studio. |
+| `rbx_gen_mesh` | Text prompt or image → local AI mesh → MeshPart inserted into Studio. **Optional** — see [Local mesh generation](#local-mesh-generation-optional). |
 
 ### Studio & play mode
 
@@ -154,8 +155,43 @@ If the user asks you to install roblox-buildkit, follow these steps:
    ```
 6. **Verify** — after a restart, call `rbx_status`; it should report the plugin connected and polling. Studio and the server can start in any order.
 
+## Local mesh generation (optional)
+
+`rbx_gen_mesh` drives a **local** generation chain (ComfyUI → Hunyuan3D → Blender → Open
+Cloud upload) that runs on your own GPU. That pipeline lives in `pipeline/gen_to_roblox.py`
+and is **not part of this repo** — a plain clone doesn't have it.
+
+The server checks for the script at startup and only registers `rbx_gen_mesh` when it's
+actually there, so a normal install simply doesn't see the tool (you'll get one line on
+stderr saying it's disabled). Nothing else is affected. To enable it, drop the pipeline in
+place and add your Open Cloud key + Creator ID via the plugin's **Settings** panel.
+
+## Development
+
+```powershell
+npm install
+npm run build   # tsc -> dist/, then regenerate + install the plugin .rbxmx
+npm test        # vitest: path mapping, GUI theme resolution, bridge routing + failover
+```
+
+The tests cover the pure-TypeScript layer (`src/sync.ts`, `src/gui.ts`, `src/bridge.ts`);
+the bridge suite drives real HTTP with a fake plugin, so the long-poll contract, place/ctx
+routing, shared-bridge promotion, and the endpoint guards are all exercised for real. The
+Luau plugin needs Studio and isn't covered — change it with corresponding care.
+
+`plugin/BuildKitPlugin.rbxmx` is generated from `plugin/BuildKitPlugin.luau` but tracked so
+users can install without the toolchain: run `npm run build` and commit both together. CI
+fails if they drift.
+
 ## Notes / limits
 
 - Capture brings Studio to the foreground and grabs the window (CopyFromScreen) — reliable for GPU 3D content, but Studio must not be fully off-screen.
 - Plugin uses a fixed command vocabulary (no arbitrary Luau eval — plugins can't `loadstring`). Use the official `execute_luau` for ad-hoc code.
 - Port defaults to 44760 (`BUILDKIT_PORT` env to change; must match `BASE` in the plugin).
+- **The bridge is unauthenticated.** It binds `127.0.0.1` only and rejects browser-origin
+  requests (so a web page can't reach it), but any *local* process can drive your Studio
+  through it — including `sync`, which writes script source into the open place. That's the
+  same trust boundary as any local dev server; be aware of it on a shared machine.
+- A capture that fails partway can leave parts hidden or recolored. Each such change now
+  also records its original value as an attribute on the part, so `rbx_restore` (or just
+  reloading the plugin) puts everything back — even in a later Studio session.

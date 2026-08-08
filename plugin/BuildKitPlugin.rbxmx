@@ -2882,6 +2882,37 @@ local VIEW_DIRS = {
 local cutStore = {}
 local cutSeq = 0
 
+-- Durable undo metadata for the temporary display mutations (cutaway / isolate hide a
+-- part; contrast recolors it). cutStore alone is in-memory, so a stranded token used to
+-- be unrecoverable — these attributes let handlers.restore_all rebuild the undo from the
+-- DataModel, even in a later Studio session. Always written BEFORE the property changes.
+-- (One table rather than three locals: this chunk is near Luau's 200-local scope limit.)
+local ATTR = {
+	hidden = "BuildKitHidden",
+	contrastColor = "BuildKitContrastColor",
+	contrastMat = "BuildKitContrastMaterial",
+}
+
+-- Hide a part, remembering its original Transparency on the part itself. Never
+-- overwrite an existing stash: re-hiding an already-hidden part would record 1 and
+-- make the restore a no-op (nested cutaway + isolate is a real case).
+local function hidePart(p)
+	if p:GetAttribute(ATTR.hidden) == nil then
+		p:SetAttribute(ATTR.hidden, p.Transparency)
+	end
+	p.Transparency = 1
+end
+
+-- Recolor a part for contrast mode, remembering its original Color/Material.
+local function contrastPart(p, color)
+	if p:GetAttribute(ATTR.contrastColor) == nil then
+		p:SetAttribute(ATTR.contrastColor, p.Color)
+		p:SetAttribute(ATTR.contrastMat, p.Material.Name)
+	end
+	p.Color = color
+	p.Material = Enum.Material.SmoothPlastic
+end
+
 local handlers = {}
 
 function handlers.ping()
@@ -3661,7 +3692,7 @@ function handlers.cutaway(args)
 	for _, d in ipairs(root:GetDescendants()) do
 		if d:IsA("BasePart") and not d:IsA("Terrain") and d.Position.Y > y then
 			table.insert(hidden, { inst = d, transparency = d.Transparency })
-			d.Transparency = 1
+			hidePart(d)
 		end
 	end
 	cutStore[token] = hidden
@@ -3676,12 +3707,61 @@ function handlers.restore(args)
 			if e.inst and e.inst.Parent then
 				pcall(function()
 					e.inst.Transparency = e.transparency
+					e.inst:SetAttribute(ATTR.hidden, nil)
 				end)
 			end
 		end
 		cutStore[args.token] = nil
 	end
 	return { restored = true }
+end
+
+-- Sweep-restore EVERY outstanding BuildKit hide/recolor, with no token needed.
+--
+-- The in-memory cutStore is the fast path, but it dies with the plugin session, so a
+-- token stranded by a failed tool call (or a Studio restart) used to be unrecoverable —
+-- the parts stayed invisible, and saving the place baked that into the .rbxl. Each
+-- mutation now also writes its original value to an attribute on the part, so this can
+-- rebuild the undo from the DataModel alone. Runs on plugin load and is exposed as a
+-- command, so "everything went invisible" is always one call away from fixed.
+function handlers.restore_all()
+	local shown, recolored = 0, 0
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local t = d:GetAttribute(ATTR.hidden)
+			if type(t) == "number" then
+				pcall(function()
+					d.Transparency = t
+					d:SetAttribute(ATTR.hidden, nil)
+				end)
+				shown += 1
+			end
+			local c = d:GetAttribute(ATTR.contrastColor)
+			local m = d:GetAttribute(ATTR.contrastMat)
+			if typeof(c) == "Color3" then
+				pcall(function()
+					d.Color = c
+					-- Enum.Material[bad] THROWS rather than returning nil, so guard the
+					-- lookup separately — an unrecognized saved name must not abort the
+					-- color restore or leave the attributes behind.
+					if type(m) == "string" then
+						local okMat, mat = pcall(function()
+							return Enum.Material[m]
+						end)
+						if okMat and mat then
+							d.Material = mat
+						end
+					end
+					d:SetAttribute(ATTR.contrastColor, nil)
+					d:SetAttribute(ATTR.contrastMat, nil)
+				end)
+				recolored += 1
+			end
+		end
+	end
+	-- Drop the in-memory tokens too; the DataModel is now the source of truth.
+	table.clear(cutStore)
+	return { restored = true, shown = shown, recolored = recolored }
 end
 
 function handlers.inspect(args)
@@ -4319,6 +4399,7 @@ function handlers.isolate(args)
 					if e.inst and e.inst.Parent then
 						pcall(function()
 							e.inst.Transparency = e.transparency
+							e.inst:SetAttribute(ATTR.hidden, nil)
 						end)
 					end
 				end
@@ -4348,7 +4429,7 @@ function handlers.isolate(args)
 	for _, d in ipairs(workspace:GetDescendants()) do
 		if d:IsA("BasePart") and not d:IsA("Terrain") and not keepSet[d] then
 			table.insert(hidden, { inst = d, transparency = d.Transparency })
-			d.Transparency = 1
+			hidePart(d)
 		end
 	end
 	cutStore[token] = hidden
@@ -4432,6 +4513,8 @@ function handlers.contrast(args)
 						pcall(function()
 							e.inst.Color = e.color
 							e.inst.Material = e.material
+							e.inst:SetAttribute(ATTR.contrastColor, nil)
+							e.inst:SetAttribute(ATTR.contrastMat, nil)
 						end)
 					end
 				end
@@ -4452,8 +4535,7 @@ function handlers.contrast(args)
 	for _, p in ipairs(partsOf(inst)) do
 		table.insert(stash, { inst = p, color = p.Color, material = p.Material })
 		i += 1
-		p.Color = CONTRAST_PALETTE[(i % #CONTRAST_PALETTE) + 1]
-		p.Material = Enum.Material.SmoothPlastic
+		contrastPart(p, CONTRAST_PALETTE[(i % #CONTRAST_PALETTE) + 1])
 	end
 	cutStore[token] = stash
 	return { mode = "on", token = token, count = #stash }
@@ -4953,6 +5035,18 @@ btn.Click:Connect(function()
 end)
 
 print("[BuildKit] plugin loaded, polling " .. BASE)
+
+-- Self-heal on load: if a previous session died mid-capture (or a tool call failed
+-- between hiding parts and restoring them), the parts are still invisible/recolored and
+-- their tokens are gone. The attribute stash survives, so sweep it clean now — otherwise
+-- the user finds geometry missing with no way to get it back, and saving bakes it in.
+do
+	local ok, res = pcall(handlers.restore_all)
+	if ok and res and (res.shown > 0 or res.recolored > 0) then
+		print(("[BuildKit] recovered %d hidden and %d recolored part(s) from a previous session")
+			:format(res.shown, res.recolored))
+	end
+end
 
 -- ---------- settings dock widget --------------------------------------------
 -- A dockable panel for connection creds (Open Cloud key, Creator ID, ComfyUI URL,
