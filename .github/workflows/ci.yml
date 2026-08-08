@@ -50,9 +50,7 @@ jobs:
           sudo mv selene /usr/local/bin/
       - name: Lint the Luau plugin
         run: |
-          # Fail on real selene errors (parse failures, undefined vars, std misuse);
-          # pass on the legacy warning backlog so it doesn't block merges. The warning
-          # count is printed so regressions are visible even though it's non-fatal.
-          selene plugin --config selene.toml --allow-warnings --display-style=json \
-            > /tmp/selene.json 2>&1 || { echo "::error::selene found errors — fix them before merging"; exit 1; }
-          node -e "const fs=require('fs');const lines=fs.readFileSync('/tmp/selene.json','utf8').trim().split(/\r?\n/).filter(Boolean);let e=0,w=0;for(const l of lines){try{const j=JSON.parse(l);if(j.severity==='Error')e++;else if(j.severity==='Warning')w++}catch{}}console.log('selene: '+w+' warnings (non-fatal backlog), '+e+' errors')"
+          # Selene on the plugin (0.31.0). Historically warn-only via `|| true`, which
+          # masked real errors. Now: fail on genuine errors, pass on the legacy warning
+          # backlog. Output goes straight to the log so failures are debuggable.
+          selene plugin --config selene.toml --allow-warnings
