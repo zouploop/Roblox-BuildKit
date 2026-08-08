@@ -24,16 +24,18 @@ jobs:
       - run: npm test
       - name: Audit dependencies (must stay clean)
         run: npm audit --audit-level=moderate
-      # The .rbxmx is generated from the plugin source but also tracked, so it can drift
-      # if someone edits the .luau and commits without building. Regenerate and diff.
-      # Uses bash explicitly: the previous `\`-continuation was interpreted literally by
-      # PowerShell on the Windows leg (git saw the path as "\/BuildKitPlugin.rbxmx").
-      - name: Check the committed plugin artifact matches its source
+      # BuildKitPlugin.luau is generated from plugin/src/*.luau, and BuildKitPlugin.rbxmx
+      # from that .luau — both are tracked so users can install without running the
+      # toolchain. They drift if someone edits a module and commits without building.
+      # Regenerate both and diff. Uses bash explicitly: the previous `\`-continuation was
+      # interpreted literally by PowerShell on the Windows leg (git saw the path as
+      # "\/BuildKitPlugin.rbxmx").
+      - name: Check the committed plugin artifacts match their source
         shell: bash
         run: |
           node scripts/gen-rbxmx.mjs
-          git diff --exit-code -- plugin/BuildKitPlugin.rbxmx \
-            || { echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result"; exit 1; }
+          git diff --exit-code -- plugin/BuildKitPlugin.luau plugin/BuildKitPlugin.rbxmx \
+            || { echo "::error::plugin artifacts are stale — run 'npm run build' and commit the result"; exit 1; }
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
   # headless binary, so this runs fine without Studio. The 5k-line --!nocheck file has a
@@ -50,4 +52,9 @@ jobs:
           sudo mv selene /usr/local/bin/
       - name: Lint the Luau plugin
         run: |
-          selene plugin --config selene.toml 2>&1 || true
+          # Lint the ASSEMBLED plugin (what Studio runs), not the individual src modules:
+          # each module references top-level locals that only exist after concatenation,
+          # so per-module analysis floods with false undefined_variable. Regenerate first
+          # so the artifact is fresh. (Stage-2 ModuleScript split removes this indirection.)
+          node scripts/gen-rbxmx.mjs >/dev/null 2>&1
+          selene plugin/BuildKitPlugin.luau --config selene.toml 2>&1 || true
