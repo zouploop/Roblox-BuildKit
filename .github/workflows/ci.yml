@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -42,7 +42,7 @@ jobs:
   luau-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Selene
         run: |
           curl -sL https://github.com/Kampfkarren/selene/releases/download/0.31.0/selene-0.31.0-linux.zip -o selene.zip
