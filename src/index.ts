@@ -246,16 +246,16 @@ server.registerTool(
   {
     title: "Build primitive",
     description:
-      "Create a parametric build. kind='slab' (one box), 'room' (4 walls + floor + ceiling with optional door/window openings), 'stairs', " +
-      "or clean furniture: 'cabinet' (carcass with butt joinery + a `front` layout of drawer banks [front + JOINED tray + pull] and/or doors [tight reveal, " +
-      "outer-edge hinge, swing OUTWARD, knob; style:'shaker' = frame+panel] + a controller Script that opens them on a ProximityPrompt; optional toeKick/countertop/backsplash, and `sink` to cut a basin through the counter+top and drop in a sink), " +
-      "'table' (top + 4 legs; use for coffee/dining tables), 'shelf' (open bookcase: sides + back + `shelves` boards), 'bed' (frame + mattress + headboard + pillow), " +
-      "and the house set: 'chair', 'sofa'/'armchair' (upholstered base+back+arms+cushions), 'desk' (top + drawer pedestal), 'nightstand'/'dresser' (drawers), 'wardrobe' (2 doors + rail), " +
-      "'fridge'/'stove' (carcass + interactive doors; stove adds cooktop+burners+knobs), 'toilet', 'bathtub'. All face +Z; storage pieces get the same ProximityPrompt drawer/door controller as cabinet. " +
-      "For props use kind='prop': either a `prop` PRESET (mug/bottle/glass/ashtray/tablelamp/floorlamp/book/bookstack/plate/candle/pictureframe/clock/telephone/radio — ready-made noir set-dressing, `color`+`scale` to tweak) OR a custom `parts` list of primitives (box/cylinder/ball/wedge + pos/size/rot/color/material/neon/light) composed into one model — no execute_luau needed. Props are parametric too (Scale attribute rebuilds in place). Add `csg:true` to union the parts into one smooth solid, with any part marked `negate:true` SUBTRACTED first (real hollow mugs/cups/bowls, beveled/blended forms) — CSG props are a final bake (not parametric). " +
-      "All furniture is z-fight-/gap-free by construction with textured-material defaults — verify with rbx_qa. " +
-      "Furniture is PARAMETRIC: each piece is tagged with Width/Height/Depth/Color attributes (edit them in the Properties panel and the buildkit regenerates it in place), auto-sizes to real proportions when `size` is omitted, and chair/sofa/armchair get a sit-on Seat. Optional quality flags: `preset` (era/style), `weather`, `csg` (smooth carcass shell), `plinth`, `bevel`. " +
-      "Returns the created model name and part count. Capture it afterward (rbx_frame + official screen_capture).",
+      "Create a parametric build — prefer this over hand-writing geometry: every piece is z-fight- and gap-free by construction, with textured-material defaults. " +
+      "Structure: 'slab' (one box), 'room' (walls+floor+ceiling, with door/window openings), 'stairs'. " +
+      "Furniture: 'cabinet', 'table', 'shelf', 'bed', 'chair', 'sofa'/'armchair', 'desk', 'nightstand', 'dresser', 'wardrobe', 'fridge', 'stove', 'toilet', 'bathtub'. " +
+      "Props: kind='prop' with either a `prop` preset or a custom `parts` list. " +
+      "\n\nConventions that apply throughout: everything faces +Z. Furniture auto-sizes to real proportions when `size` is omitted, and is PARAMETRIC — each piece carries " +
+      "Width/Height/Depth/Color attributes, and editing those in the Properties panel regenerates it in place. Storage pieces (cabinet/desk/nightstand/dresser/wardrobe/fridge/stove) " +
+      "get real pull-out drawers and swing-out doors driven by a ProximityPrompt controller Script; chair/sofa/armchair get a sit-on Seat. " +
+      "`csg:true` unions the static shell into one smooth solid (moving parts stay separate), and inside a prop any part marked `negate:true` is SUBTRACTED first — that's how you get " +
+      "genuinely hollow mugs/bowls. CSG output is a final bake, no longer parametric. " +
+      "\n\nReturns the model name and part count. Verify with rbx_qa, then capture (rbx_frame + the official screen_capture). Per-kind options are documented on the fields below.",
     inputSchema: {
       spec: z
         .object({
