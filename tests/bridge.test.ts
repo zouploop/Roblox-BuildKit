@@ -154,6 +154,19 @@ describe("place routing", () => {
     await rejected;
   });
 
+  it("does not dispatch a command whose timeout already fired", async () => {
+    const port = await freePort();
+    const b = await startBridge(port);
+    // No poller present: the command queues, then times out. A poller arriving LATER
+    // must NOT be handed the dead command — otherwise it would run the mutation in
+    // Studio with nobody awaiting the result (stranding cutaway hides, double-running
+    // builds). Regression for the timeout-dequeue fix.
+    const pending = b.sendCommand("cutaway", { target: "House", mode: "y", y: 5 }, 150);
+    await expect(pending).rejects.toThrow(/timeout/);
+    // Poll now that the timeout has fired: nothing must be dispatched.
+    expect(await pollBriefly(port, "MyPlace", "edit", 250)).toBeNull();
+  });
+
   it("treats a blank filter as cleared", async () => {
     const port = await freePort();
     const b = await startBridge(port);

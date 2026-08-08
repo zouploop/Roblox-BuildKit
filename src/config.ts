@@ -7,7 +7,9 @@ import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const CONFIG_DIR = path.join(os.homedir(), ".buildkit");
+// BUILDKIT_CONFIG_DIR lets tests (and anyone who wants to relocate the file) point the
+// config at a non-default location. Defaults to ~/.buildkit.
+export const CONFIG_DIR = process.env.BUILDKIT_CONFIG_DIR || path.join(os.homedir(), ".buildkit");
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
 export async function loadConfig(): Promise<Record<string, unknown>> {

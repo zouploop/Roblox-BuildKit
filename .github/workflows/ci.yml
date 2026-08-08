@@ -36,9 +36,9 @@ jobs:
             || { echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result"; exit 1; }
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
-  # headless binary, so this runs fine without Studio. The 5k-line --!nocheck file has a
-  # legacy warning backlog, so this job is warn-only for now: it surfaces the count without
-  # blocking merges. Bump to fail-on-warning once the backlog is cleared.
+  # headless binary, so this runs fine without Studio. Fail on real errors (parse
+  # failures, undefined vars); the legacy warning backlog is non-fatal but counted and
+  # printed so it can't silently regress. Tighten to fail-on-warning as the backlog clears.
   luau-lint:
     runs-on: ubuntu-latest
     steps:
@@ -50,4 +50,9 @@ jobs:
           sudo mv selene /usr/local/bin/
       - name: Lint the Luau plugin
         run: |
-          selene plugin --config selene.toml 2>&1 || true
+          # Fail on real selene errors (parse failures, undefined vars, std misuse);
+          # pass on the legacy warning backlog so it doesn't block merges. The warning
+          # count is printed so regressions are visible even though it's non-fatal.
+          selene plugin --config selene.toml --allow-warnings --display-style=json \
+            > /tmp/selene.json 2>&1 || { echo "::error::selene found errors — fix them before merging"; exit 1; }
+          node -e "const fs=require('fs');const lines=fs.readFileSync('/tmp/selene.json','utf8').trim().split(/\r?\n/).filter(Boolean);let e=0,w=0;for(const l of lines){try{const j=JSON.parse(l);if(j.severity==='Error')e++;else if(j.severity==='Warning')w++}catch{}}console.log('selene: '+w+' warnings (non-fatal backlog), '+e+' errors')"

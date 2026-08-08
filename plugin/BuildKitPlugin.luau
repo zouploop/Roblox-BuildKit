@@ -4445,6 +4445,7 @@ function handlers.optimize(args)
 			if d.Position.Magnitude > 10000 then far = far + 1 end
 			if d:IsA("MeshPart") then
 				meshParts = meshParts + 1
+				-- selene: allow(incorrect_standard_library_use) -- CollisionFidelity.Precise exists in Roblox; selene 0.31's bundled std is stale
 				if d.CollisionFidelity == Enum.CollisionFidelity.Precise then precise[#precise + 1] = d end
 			end
 		elseif d:IsA("Decal") or d:IsA("Texture") then
