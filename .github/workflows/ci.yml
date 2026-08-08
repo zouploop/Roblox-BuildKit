@@ -48,6 +48,7 @@ jobs:
           curl -sL https://github.com/Kampfkarren/selene/releases/download/0.31.0/selene-0.31.0-linux.zip -o selene.zip
           unzip -o selene.zip
           sudo mv selene /usr/local/bin/
+          sudo chmod +x /usr/local/bin/selene
       - name: Lint the Luau plugin
         run: |
           # Selene on the plugin (0.31.0). Historically warn-only via `|| true`, which
