@@ -36,6 +36,8 @@ jobs:
           node scripts/gen-rbxmx.mjs
           git diff --exit-code -- plugin/BuildKitPlugin.luau plugin/BuildKitPlugin.rbxmx \
             || { echo "::error::plugin artifacts are stale — run 'npm run build' and commit the result"; exit 1; }
+      - name: Check plugin scope oracle
+        run: node scripts/check-plugin.mjs --flat
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
   # headless binary, so this runs fine without Studio. The 5k-line --!nocheck file has a

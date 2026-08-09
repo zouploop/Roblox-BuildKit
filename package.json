@@ -9,7 +9,7 @@
     "roblox-buildkit-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/gen-rbxmx.mjs && node scripts/postbuild.mjs",
+    "build": "tsc && node scripts/gen-rbxmx.mjs && node scripts/check-plugin.mjs --flat && node scripts/postbuild.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest"
