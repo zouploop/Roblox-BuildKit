@@ -20,17 +20,11 @@ restart Studio, run the affected tool, watch Output for errors.
 ## Committing
 
 - **The Luau source of truth is `plugin/src/*.luau`** (ordered, numeric-prefixed modules).
-  `plugin/BuildKitPlugin.luau` and `plugin/BuildKitPlugin.rbxmx` are **generated** from it
-  by `npm run build` (or `node scripts/gen-rbxmx.mjs`). Edit a module in `plugin/src/`, run
-  the build, and commit the regenerated `BuildKitPlugin.luau` + `BuildKitPlugin.rbxmx`
-  together. CI fails if the committed artifacts are stale, and a lone `plugin/src/` edit
-  that skips regeneration will be caught.
-  - The split is a pure concatenation in module order (`00-` … `140-`): the assembled
-    `.luau` is byte-identical to what a single file would be, so cross-module locals are
-    one shared scope — the same behaviour as before the split. (The deeper ModuleScript
-    split that gives each module its own scope is the follow-up.)
-  - `scripts/split-plugin.mjs` re-slices the assembled file back into `plugin/src/` if the
-    boundaries ever need adjusting; it asserts the partition is byte-identical.
+  Each source file is a ModuleScript with explicit imports and an export table.
+  `plugin/BuildKitPlugin.rbxmx` is the single generated artifact, produced by `npm run build`
+  (or `node scripts/gen-rbxmx.mjs`). Edit a module in `plugin/src/`, run the build, and commit
+  the regenerated artifact. CI fails if it is stale, and a lone `plugin/src/` edit that skips
+  regeneration will be caught.
 - Keep the version single-sourced: it lives in `package.json` only (the server reads it at
   startup).
 - Match the commit style: imperative subject line, a short body describing *why*.
