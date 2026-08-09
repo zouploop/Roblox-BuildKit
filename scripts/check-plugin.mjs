@@ -93,6 +93,20 @@ Faces Axes Region3 Ray Font CatalogSearchParams DockWidgetPluginGuiInfo Content 
 type typeof tostring tonumber select pairs ipairs next pcall xpcall error warn assert require setmetatable getmetatable rawget rawset
 rawequal unpack print time tick wait spawn delay elapsedTime shared settings UserSettings`.split(/\s+/));
 const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g;
+const S2_TABLES = new Set(["Core", "Detail", "Parametric", "FxParts"]);
+const S1_CROSS_SYMBOLS = new Set([
+	"BASE", "BRIDGE_TOKEN", "BUILDERS", "CHEST_LID_SOURCE", "CONFIG_DEFAULTS", "ChangeHistoryService", "GUI_DEFAULT_THEME",
+	"HttpService", "Lighting", "PLACE", "PROP_PRESETS", "PROP_REGEN_SOURCE", "RUNNING", "RUNTIME_SOURCE", "_regenBusy",
+	"_regenTarget", "addSitSeat", "applyQuality", "barPull", "bboxOf", "bevelTopEdges", "buildBathtub", "buildBed",
+	"buildCabinet", "buildChair", "buildDesk", "buildDresser", "buildFridge", "buildNightstand", "buildNode", "buildProp",
+	"buildRoom", "buildSeating", "buildShelf", "buildSlab", "buildStairs", "buildStove", "buildTable", "buildToilet",
+	"buildWardrobe", "buildWarnings", "camera", "colorOf", "csgProp", "describeInst", "findInst", "getBBox",
+	"getOrMakeModel", "gmerge", "handlers", "makeBall", "makeBox", "makeCyl", "makePart", "matOf", "partsOf",
+	"pivotWorld", "plinthBase", "post", "prepSpec", "r1", "recorded", "regenBuildKit", "roundKnob", "roundLeg",
+	"scaleP", "scanBuildKit", "tagBuildKit", "toolbar", "watchBuildKit",
+]);
+const S2_REMOVED = new Set(["RUNNING", "_regenTarget", "buildWarnings", "regenBuildKit", "BUILDERS"]);
+const S2_ADDED = new Set(["Core", "Detail", "FxParts", "Parametric"]);
 
 function hide(value) {
 	return value.replace(/[^\n]/g, " ");
@@ -233,6 +247,15 @@ function crossGraph(records) {
 		if (active.length) activeEdges.push([consumer, provider, active]);
 		for (const name of active) symbols.add(name);
 	}
+	for (const table of S2_TABLES) {
+		const owner = records.find((record) => record.top.has(table));
+		if (!owner) continue;
+		const consumers = records.filter((record) => record.file !== owner.file && references(record.masked, table));
+		if (consumers.length) {
+			symbols.add(table);
+			for (const consumer of consumers) activeEdges.push([consumer.file, owner.file, [table]]);
+		}
+	}
 	return { symbols, edges: activeEdges };
 }
 
@@ -317,9 +340,15 @@ if (unresolvedErrors.length) {
 	if (flat && !flatStage2 && (declarationsCount !== 150 || graph.symbols.size !== 70 || graph.edges.length !== 28 || cycles !== 0)) {
 		errors.push(`G1 baseline mismatch: declarations=${declarationsCount} cross-module symbols=${graph.symbols.size} edges=${graph.edges.length} cycles=${cycles}`);
 	}
-	if (flat && flatStage2 && graph.symbols.size !== 65) {
-		errors.push(`G2 rebound-symbol graph mismatch: cross-module symbols=${graph.symbols.size}, expected 65`);
+if (flat && flatStage2) {
+	const removed = [...S1_CROSS_SYMBOLS].filter((name) => !graph.symbols.has(name)).sort();
+	const added = [...graph.symbols].filter((name) => !S1_CROSS_SYMBOLS.has(name)).sort();
+	if (graph.symbols.size !== 69 || declarationsCount !== 150 || cycles !== 0 || removed.join(" ") !== [...S2_REMOVED].sort().join(" ") || added.join(" ") !== [...S2_ADDED].sort().join(" ")) {
+		errors.push(`G2 rebound-symbol graph mismatch: cross-module symbols=${graph.symbols.size}, expected 69`);
+		errors.push(`G2 removed: ${removed.join(" ")}`);
+		errors.push(`G2 added: ${added.join(" ")}`);
 	}
+}
 }
 
 checkHandlers(records, errors);
@@ -331,3 +360,6 @@ if (errors.length) {
 }
 
 console.log(`[check-plugin] declarations=${declarationsCount} cross-module symbols=${graph.symbols.size} edges=${graph.edges.length} cycles=${cycles}`);
+if (flatStage2) {
+	console.log(`[check-plugin] delta removed=${[...S2_REMOVED].sort().join(",")} added=${[...S2_ADDED].sort().join(",")}`);
+}

@@ -9,7 +9,8 @@ local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 local BASE = "http://127.0.0.1:44760"
 local PLACE = tostring(game.Name)
-local RUNNING = true
+local Core = {}
+Core.RUNNING = true
 
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).

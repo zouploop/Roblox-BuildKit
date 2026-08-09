@@ -81,7 +81,8 @@ end
 
 -- Non-fatal build warnings (degenerate/oversize/ball-collapse), surfaced in the build result.
 -- handlers.build clears this at the start of each build and merges it into the qa warnings.
-local buildWarnings = {}
+local FxParts = {}
+FxParts.buildWarnings = {}
 local function makePart(parent, ps, ox, oy, oz)
 	local shape = tostring(ps.shape or "box"):lower()
 	local sz = ps.size or { 1, 1, 1 }
@@ -93,13 +94,13 @@ local function makePart(parent, ps, ox, oy, oz)
 	local nm = ps.name or shape
 	for i = 1, 3 do
 		if sz[i] <= 0.001 then
-			buildWarnings[#buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
+			FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
 			sz[i] = 0.05
 		end
 	end
 	if shape == "ball" and math.max(sz[1], sz[2], sz[3]) - math.min(sz[1], sz[2], sz[3]) > 0.05 then
 		local mean = (sz[1] + sz[2] + sz[3]) / 3
-		buildWarnings[#buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
+		FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
 		sz = { mean, mean, mean }
 	end
 	local p

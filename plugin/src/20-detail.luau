@@ -58,10 +58,11 @@ local function roundLeg(parent, x, y0, y1, z, dia, color, mat, name)
 	return makeCyl(parent, x, (y0 + y1) / 2, z, y1 - y0, dia, "y", color, mat, name or "Leg")
 end
 
-local _regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
+local Detail = {}
+Detail._regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
 local function getOrMakeModel(parentName, name)
-	if _regenTarget then
-		return _regenTarget
+	if Detail._regenTarget then
+		return Detail._regenTarget
 	end
 	local parent = workspace
 	if parentName then

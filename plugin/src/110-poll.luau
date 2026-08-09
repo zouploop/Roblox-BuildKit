@@ -63,7 +63,7 @@ end
 task.spawn(function()
 	local backoff = 1.0
 	while true do
-		if not RUNNING then
+	if not Core.RUNNING then
 			task.wait(0.5)
 			continue
 		end

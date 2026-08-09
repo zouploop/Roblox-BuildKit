@@ -1923,7 +1923,7 @@ function handlers.build(spec)
 	end
 	return recorded("BuildKit build " .. tostring(spec.kind), function()
 		prepSpec(spec) -- apply era preset + real-proportion default size before building
-		buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
+		FxParts.buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
 		local model
 		if spec.kind == "room" then
 			model = buildRoom(spec)
@@ -1998,7 +1998,7 @@ function handlers.build(spec)
 			end
 			-- D: surface primitive guards (ball-collapse / degenerate) + prop oversize, even if auto-QA off.
 			local extra = {}
-			for _, w in ipairs(buildWarnings) do extra[#extra + 1] = w end
+			for _, w in ipairs(FxParts.buildWarnings) do extra[#extra + 1] = w end
 			if spec.kind == "prop" then
 				local md = math.max(bsz.X, bsz.Y, bsz.Z)
 				if md > 24 then

@@ -1,11 +1,11 @@
 -- ---------- toolbar toggle ---------------------------------------------------
 local toolbar = plugin:CreateToolbar("BuildKit")
 local btn = toolbar:CreateButton("BuildKit", "Toggle BuildKit polling", "")
-btn:SetActive(RUNNING)
+btn:SetActive(Core.RUNNING)
 btn.Click:Connect(function()
-	RUNNING = not RUNNING
-	btn:SetActive(RUNNING)
-	print("[BuildKit] polling " .. (RUNNING and "ON" or "OFF"))
+	Core.RUNNING = not Core.RUNNING
+	btn:SetActive(Core.RUNNING)
+	print("[BuildKit] polling " .. (Core.RUNNING and "ON" or "OFF"))
 end)
 
 print("[BuildKit] plugin loaded, polling " .. BASE)

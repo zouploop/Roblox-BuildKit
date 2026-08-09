@@ -14,7 +14,8 @@ local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 local BASE = "http://127.0.0.1:44760"
 local PLACE = tostring(game.Name)
-local RUNNING = true
+local Core = {}
+Core.RUNNING = true
 
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
@@ -381,10 +382,11 @@ local function roundLeg(parent, x, y0, y1, z, dia, color, mat, name)
 	return makeCyl(parent, x, (y0 + y1) / 2, z, y1 - y0, dia, "y", color, mat, name or "Leg")
 end
 
-local _regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
+local Detail = {}
+Detail._regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
 local function getOrMakeModel(parentName, name)
-	if _regenTarget then
-		return _regenTarget
+	if Detail._regenTarget then
+		return Detail._regenTarget
 	end
 	local parent = workspace
 	if parentName then
@@ -405,8 +407,7 @@ end
 -- the geometry in place when an attribute changes — tweak a value in the Properties
 -- panel and it regenerates. (A real engine ProceduralModel only renders when Roblox's
 -- backend created it, so BuildKit acts as the engine here.)
-local regenBuildKit -- forward decl (assigned after the builders are defined)
-local BUILDERS -- forward decl (kind -> builder fn; filled after the builders)
+local Parametric = {}
 local PARAMETRIC_KINDS = {
 	cabinet = true, table = true, shelf = true, bed = true, chair = true, sofa = true,
 	armchair = true, desk = true, nightstand = true, dresser = true, wardrobe = true,
@@ -441,7 +442,7 @@ local function watchBuildKit(model)
 		_pending[model] = true
 		task.defer(function() -- debounce so multi-attribute edits batch into one rebuild
 			_pending[model] = nil
-			if model.Parent and regenBuildKit then regenBuildKit(model) end
+	if model.Parent and Parametric.regenBuildKit then Parametric.regenBuildKit(model) end
 		end)
 	end)
 	model.AncestryChanged:Connect(function()
@@ -664,7 +665,8 @@ end
 
 -- Non-fatal build warnings (degenerate/oversize/ball-collapse), surfaced in the build result.
 -- handlers.build clears this at the start of each build and merges it into the qa warnings.
-local buildWarnings = {}
+local FxParts = {}
+FxParts.buildWarnings = {}
 local function makePart(parent, ps, ox, oy, oz)
 	local shape = tostring(ps.shape or "box"):lower()
 	local sz = ps.size or { 1, 1, 1 }
@@ -676,13 +678,13 @@ local function makePart(parent, ps, ox, oy, oz)
 	local nm = ps.name or shape
 	for i = 1, 3 do
 		if sz[i] <= 0.001 then
-			buildWarnings[#buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
+			FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
 			sz[i] = 0.05
 		end
 	end
 	if shape == "ball" and math.max(sz[1], sz[2], sz[3]) - math.min(sz[1], sz[2], sz[3]) > 0.05 then
 		local mean = (sz[1] + sz[2] + sz[3]) / 3
-		buildWarnings[#buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
+		FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
 		sz = { mean, mean, mean }
 	end
 	local p
@@ -2458,7 +2460,7 @@ local function buildBathtub(spec)
 end
 
 -- kind -> builder, used by handlers.build AND regenBuildKit (in-place rebuild).
-BUILDERS = {
+local BUILDERS = {
 	cabinet = buildCabinet, table = buildTable, shelf = buildShelf, bed = buildBed, chair = buildChair,
 	sofa = function(s) return buildSeating(s, math.max(2, math.floor(s.seats or 3))) end,
 	armchair = function(s) return buildSeating(s, 1) end,
@@ -2469,7 +2471,7 @@ BUILDERS = {
 -- Rebuild a tagged piece IN PLACE from its current attributes (size/color/center from
 -- live attributes, nested fields from BuildKitSpec). Clears old geometry, builds into
 -- the same model so identity/selection + the attributes survive.
-regenBuildKit = function(model)
+Parametric.regenBuildKit = function(model)
 	local kind = model:GetAttribute("BuildKitKind")
 	local fn = BUILDERS[kind]
 	if not fn or _regenBusy[model] then return end
@@ -2495,9 +2497,9 @@ regenBuildKit = function(model)
 		for _, c in ipairs(model:GetChildren()) do
 			c:Destroy()
 		end
-		_regenTarget = model
+		Detail._regenTarget = model
 		pcall(fn, spec)
-		_regenTarget = nil
+		Detail._regenTarget = nil
 	end)
 	_regenBusy[model] = false
 end
@@ -4831,7 +4833,7 @@ function handlers.build(spec)
 	end
 	return recorded("BuildKit build " .. tostring(spec.kind), function()
 		prepSpec(spec) -- apply era preset + real-proportion default size before building
-		buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
+		FxParts.buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
 		local model
 		if spec.kind == "room" then
 			model = buildRoom(spec)
@@ -4906,7 +4908,7 @@ function handlers.build(spec)
 			end
 			-- D: surface primitive guards (ball-collapse / degenerate) + prop oversize, even if auto-QA off.
 			local extra = {}
-			for _, w in ipairs(buildWarnings) do extra[#extra + 1] = w end
+			for _, w in ipairs(FxParts.buildWarnings) do extra[#extra + 1] = w end
 			if spec.kind == "prop" then
 				local md = math.max(bsz.X, bsz.Y, bsz.Z)
 				if md > 24 then
@@ -5125,7 +5127,7 @@ end
 task.spawn(function()
 	local backoff = 1.0
 	while true do
-		if not RUNNING then
+	if not Core.RUNNING then
 			task.wait(0.5)
 			continue
 		end
@@ -5183,11 +5185,11 @@ end)
 -- ---------- toolbar toggle ---------------------------------------------------
 local toolbar = plugin:CreateToolbar("BuildKit")
 local btn = toolbar:CreateButton("BuildKit", "Toggle BuildKit polling", "")
-btn:SetActive(RUNNING)
+btn:SetActive(Core.RUNNING)
 btn.Click:Connect(function()
-	RUNNING = not RUNNING
-	btn:SetActive(RUNNING)
-	print("[BuildKit] polling " .. (RUNNING and "ON" or "OFF"))
+	Core.RUNNING = not Core.RUNNING
+	btn:SetActive(Core.RUNNING)
+	print("[BuildKit] polling " .. (Core.RUNNING and "ON" or "OFF"))
 end)
 
 print("[BuildKit] plugin loaded, polling " .. BASE)

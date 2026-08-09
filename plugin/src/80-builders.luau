@@ -838,7 +838,7 @@ local function buildBathtub(spec)
 end
 
 -- kind -> builder, used by handlers.build AND regenBuildKit (in-place rebuild).
-BUILDERS = {
+local BUILDERS = {
 	cabinet = buildCabinet, table = buildTable, shelf = buildShelf, bed = buildBed, chair = buildChair,
 	sofa = function(s) return buildSeating(s, math.max(2, math.floor(s.seats or 3))) end,
 	armchair = function(s) return buildSeating(s, 1) end,
@@ -849,7 +849,7 @@ BUILDERS = {
 -- Rebuild a tagged piece IN PLACE from its current attributes (size/color/center from
 -- live attributes, nested fields from BuildKitSpec). Clears old geometry, builds into
 -- the same model so identity/selection + the attributes survive.
-regenBuildKit = function(model)
+Parametric.regenBuildKit = function(model)
 	local kind = model:GetAttribute("BuildKitKind")
 	local fn = BUILDERS[kind]
 	if not fn or _regenBusy[model] then return end
@@ -875,9 +875,9 @@ regenBuildKit = function(model)
 		for _, c in ipairs(model:GetChildren()) do
 			c:Destroy()
 		end
-		_regenTarget = model
+		Detail._regenTarget = model
 		pcall(fn, spec)
-		_regenTarget = nil
+		Detail._regenTarget = nil
 	end)
 	_regenBusy[model] = false
 end

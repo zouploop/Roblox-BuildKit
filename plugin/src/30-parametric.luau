@@ -4,8 +4,7 @@
 -- the geometry in place when an attribute changes — tweak a value in the Properties
 -- panel and it regenerates. (A real engine ProceduralModel only renders when Roblox's
 -- backend created it, so BuildKit acts as the engine here.)
-local regenBuildKit -- forward decl (assigned after the builders are defined)
-local BUILDERS -- forward decl (kind -> builder fn; filled after the builders)
+local Parametric = {}
 local PARAMETRIC_KINDS = {
 	cabinet = true, table = true, shelf = true, bed = true, chair = true, sofa = true,
 	armchair = true, desk = true, nightstand = true, dresser = true, wardrobe = true,
@@ -40,7 +39,7 @@ local function watchBuildKit(model)
 		_pending[model] = true
 		task.defer(function() -- debounce so multi-attribute edits batch into one rebuild
 			_pending[model] = nil
-			if model.Parent and regenBuildKit then regenBuildKit(model) end
+	if model.Parent and Parametric.regenBuildKit then Parametric.regenBuildKit(model) end
 		end)
 	end)
 	model.AncestryChanged:Connect(function()
