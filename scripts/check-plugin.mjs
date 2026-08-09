@@ -187,7 +187,7 @@ function importedAliases(masked, knownModules, file) {
 		requires.push({ target, field, alias });
 		if (!knownModules.has(target)) throw new Error(`G3 require target '${target}' not in tree`);
 	}
-	for (const match of masked.matchAll(/\brequire\s*\(/g)) {
+	for (const match of masked.matchAll(/\brequire\b/g)) {
 		if (!canonicalRequires.has(match.index)) {
 			throw new Error(`noncanonical require in ${file}: expected local Alias = require(script.Parent.Module)`);
 		}
@@ -281,6 +281,10 @@ function accessedFields(source, alias) {
 	return fields;
 }
 
+function declaredOrReadFields(source, moduleName) {
+	return new Set(accessedFields(source, moduleName).map((access) => access.name));
+}
+
 function exportedFields(record, moduleName) {
 	const fields = new Set();
 	const footerStart = record.source.indexOf("--#region exports");
@@ -349,11 +353,13 @@ function checkArtifact(records, errors) {
 			const provider = records.find((item) => byName.get(requirement.target) === item.file);
 			if (!provider) continue;
 			const fields = exportedFields(provider, requirement.target);
+			const declaredOrRead = declaredOrReadFields(provider.masked, requirement.target);
 			const requiredFields = requirement.field ? [{ name: requirement.field, write: false }] : accessedFields(record.masked, requirement.alias);
 			for (const access of requiredFields) {
-				// Whole-module writes are intentional late-bound table fields; target identity above
-				// validates their provider while reads must already exist in its export footer.
-				if (access.write) continue;
+				if (access.write) {
+					if (!declaredOrRead.has(access.name)) errors.push(`G3 missing provider field: ${record.file} writes ${requirement.target}.${access.name}, but ${requirement.target} does not declare or read it`);
+					continue;
+				}
 				if (!fields.has(access.name)) errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${access.name}`);
 			}
 		}
