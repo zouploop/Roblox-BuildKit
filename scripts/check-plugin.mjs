@@ -283,17 +283,22 @@ function checkBridgeToken(records, errors) {
 
 function checkArtifact(records, errors) {
 	const xml = readFileSync(artifact, "utf8");
-	const itemMatches = [...xml.matchAll(/<Item\s+class="([^"]+)"[^>]*>([\s\S]*?)<\/Item>/g)];
-	const names = [...xml.matchAll(/<string\s+name="Name">([^<]*)<\/string>/g)].map((match) => match[1]);
 	const referents = [...xml.matchAll(/\breferent="([^"]+)"/g)].map((match) => match[1]);
-	if (itemMatches.length !== 17 || !xml.includes('<Item class="Script"') || !xml.includes('<string name="Name">BuildKitPlugin</string>')) {
+	const rootMatches = [...xml.matchAll(/<Item\s+class="Script"\s+referent="([^"]+)">([\s\S]*?)<\/Item>\s*<\/roblox>/g)];
+	const root = rootMatches[0]?.[2] ?? "";
+	const folderStarts = [...root.matchAll(/<Item\s+class="Folder"\s+referent="([^"]+)">/g)];
+	if (rootMatches.length !== 1 || (xml.match(/<Item\s+class="Script"/g) ?? []).length !== 1 || folderStarts.length !== 1 ||
+		!root.includes('<string name="Name">BuildKitPlugin</string>') || !root.includes('<string name="Name">Modules</string>')) {
 		errors.push(`G3 invalid rbxmx tree: expected Script + Modules + 16 ModuleScripts`);
 	}
 	if (new Set(referents).size !== referents.length) errors.push("G3 duplicate rbxmx referent");
-	const moduleItems = itemMatches.filter(([, cls]) => cls === "ModuleScript");
+	const folderIndex = folderStarts.length ? root.indexOf(folderStarts[0][0]) : -1;
+	const folder = folderIndex >= 0 ? root.slice(folderIndex) : "";
+	const moduleItems = [...folder.matchAll(/<Item\s+class="ModuleScript"\s+referent="([^"]+)">([\s\S]*?)<\/Item>/g)];
 	if (moduleItems.length !== 16) errors.push(`G3 expected 16 ModuleScript items, got ${moduleItems.length}`);
 	if (moduleItems.some(([, , body]) => body.includes('name="RunContext"'))) errors.push("G3 ModuleScript has RunContext");
 	const expected = new Set(MODULES.map(([, name]) => name));
+	const names = moduleItems.map(([, , body]) => body.match(/<string\s+name="Name">([^<]*)<\/string>/)?.[1] ?? "");
 	const actual = new Set(names.filter((name) => expected.has(name)));
 	if (actual.size !== expected.size) errors.push("G3 emitted module names do not match MODULES");
 

@@ -1,3 +1,7 @@
+--#region imports (generated — do not hand-edit)
+local HttpService = require(script.Parent.Core).HttpService
+--#endregion
+
 -- ===== Parametric furniture: self-describing, editable, plugin-regenerated =======
 -- Each built piece is TAGGED with its spec (Width/Height/Depth/Color attributes + a
 -- BuildKitSpec JSON for nested fields). The plugin WATCHES these models and rebuilds
@@ -53,3 +57,10 @@ local function scanBuildKit()
 	end
 end
 
+--#region exports (generated — do not hand-edit)
+Parametric._regenBusy = _regenBusy
+Parametric.tagBuildKit = tagBuildKit
+Parametric.watchBuildKit = watchBuildKit
+Parametric.scanBuildKit = scanBuildKit
+return Parametric
+--#endregion

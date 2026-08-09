@@ -1,3 +1,6 @@
+--#region imports (generated — do not hand-edit)
+--#endregion
+
 -- ---------- GUI builder ------------------------------------------------------
 -- Builds a styled ScreenGui from a component tree. Theme tokens (sent fully
 -- resolved by the Node side) drive corner/stroke/gradient/padding/font/color so
@@ -402,3 +405,6 @@ function buildNode(node, theme, layoutDir)
 	return inst
 end
 
+--#region exports (generated — do not hand-edit)
+return { GUI_DEFAULT_THEME = GUI_DEFAULT_THEME, gmerge = gmerge, buildNode = buildNode }
+--#endregion

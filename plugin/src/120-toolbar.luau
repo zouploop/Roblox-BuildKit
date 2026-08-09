@@ -1,3 +1,10 @@
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local Core = require(script.Parent.Core)
+local BASE = Core.BASE
+local handlers = require(script.Parent.Handlers).handlers
+--#endregion
+
 -- ---------- toolbar toggle ---------------------------------------------------
 local toolbar = plugin:CreateToolbar("BuildKit")
 local btn = toolbar:CreateButton("BuildKit", "Toggle BuildKit polling", "")
@@ -22,3 +29,6 @@ do
 	end
 end
 
+--#region exports (generated — do not hand-edit)
+return { toolbar = toolbar }
+--#endregion

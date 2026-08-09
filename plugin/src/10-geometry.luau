@@ -1,3 +1,6 @@
+--#region imports (generated — do not hand-edit)
+--#endregion
+
 -- ---------- geometry helpers -------------------------------------------------
 local function colorOf(arr, default)
 	if arr and #arr == 3 then
@@ -159,3 +162,18 @@ local function makeBox(parent, cx, cy, cz, sx, sy, sz, color, mat, name)
 	return p
 end
 
+--#region exports (generated — do not hand-edit)
+return {
+	colorOf = colorOf,
+	matOf = matOf,
+	findInst = findInst,
+	camera = camera,
+	bboxOf = bboxOf,
+	getBBox = getBBox,
+	partsOf = partsOf,
+	pivotWorld = pivotWorld,
+	r1 = r1,
+	describeInst = describeInst,
+	makeBox = makeBox,
+}
+--#endregion

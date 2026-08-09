@@ -1,3 +1,7 @@
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+--#endregion
+
 -- ---------- rounded-detail helpers (fidelity: legs / pulls / knobs / spouts) ----
 -- a Cylinder oriented along an axis: "x" (length = local X, default), "y" (vertical),
 -- "z" (along depth). len = length on that axis; dia = diameter. NOTE rbx_qa reads
@@ -77,3 +81,12 @@ local function getOrMakeModel(parentName, name)
 	return m
 end
 
+--#region exports (generated — do not hand-edit)
+Detail.makeCyl = makeCyl
+Detail.makeBall = makeBall
+Detail.barPull = barPull
+Detail.roundKnob = roundKnob
+Detail.roundLeg = roundLeg
+Detail.getOrMakeModel = getOrMakeModel
+return Detail
+--#endregion

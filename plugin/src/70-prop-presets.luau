@@ -1,3 +1,6 @@
+--#region imports (generated — do not hand-edit)
+--#endregion
+
 -- Prop preset library: ready-made multi-part props (noir set-dressing) so a caller
 -- can `{kind="prop", prop="lamp"}` instead of hand-listing primitives. Each entry
 -- returns a parts list (same schema makePart takes); s.color overrides the hero
@@ -813,3 +816,6 @@ end
 -- mug, lamp...) without a dedicated kind or execute_luau. Tagged parametric so the
 -- Scale attribute (and spec edits) rebuild it in place like the furniture kinds.
 -- With spec.csg it's instead unioned into one smooth solid (final bake, not parametric).
+--#region exports (generated — do not hand-edit)
+return { PROP_PRESETS = PROP_PRESETS, scaleP = scaleP, csgProp = csgProp }
+--#endregion

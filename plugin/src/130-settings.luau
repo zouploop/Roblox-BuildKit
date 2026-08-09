@@ -1,3 +1,10 @@
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local post = require(script.Parent.Poll).post
+local CONFIG_DEFAULTS = require(script.Parent.Poll).CONFIG_DEFAULTS
+local toolbar = require(script.Parent.Toolbar).toolbar
+--#endregion
+
 -- ---------- settings dock widget --------------------------------------------
 -- A dockable panel for connection creds (Open Cloud key, Creator ID, ComfyUI URL,
 -- Hunyuan endpoint) + build-mode toggles. Persists locally via plugin:SetSetting and
@@ -106,3 +113,6 @@ if okWidget and widget then
 	setBtn.Click:Connect(function() widget.Enabled = not widget.Enabled end)
 end
 
+--#region exports (generated — do not hand-edit)
+return {}
+--#endregion

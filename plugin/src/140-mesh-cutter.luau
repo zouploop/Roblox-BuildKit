@@ -1,3 +1,11 @@
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local watchBuildKit = require(script.Parent.Parametric).watchBuildKit
+local scanBuildKit = require(script.Parent.Parametric).scanBuildKit
+local toolbar = require(script.Parent.Toolbar).toolbar
+local CHEST_LID_SOURCE = require(script.Parent.Handlers).CHEST_LID_SOURCE
+--#endregion
+
 -- ---------- Mesh Cutter (EditableMesh) --------------------------------------
 -- Interactive in-Studio mesh editor: drop a draggable plane on a MeshPart, click Cut, and it
 -- splits into two CAPPED MeshParts (clean plane-bisect that splits crossing triangles + a flat
@@ -189,3 +197,6 @@ workspace.DescendantAdded:Connect(function(d)
 		end)
 	end
 end)
+--#region exports (generated — do not hand-edit)
+return {}
+--#endregion

@@ -1,4 +1,50 @@
 -- ---------- command handlers -------------------------------------------------
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local buildSeating = require(script.Parent.Builders).buildSeating
+local buildRoom = require(script.Parent.Builders).buildRoom
+local buildStairs = require(script.Parent.Builders).buildStairs
+local buildSlab = require(script.Parent.Builders).buildSlab
+local buildCabinet = require(script.Parent.Builders).buildCabinet
+local buildTable = require(script.Parent.Builders).buildTable
+local buildShelf = require(script.Parent.Builders).buildShelf
+local buildBed = require(script.Parent.Builders).buildBed
+local buildChair = require(script.Parent.Builders).buildChair
+local buildDesk = require(script.Parent.Builders).buildDesk
+local buildNightstand = require(script.Parent.Builders).buildNightstand
+local buildDresser = require(script.Parent.Builders).buildDresser
+local buildWardrobe = require(script.Parent.Builders).buildWardrobe
+local buildFridge = require(script.Parent.Builders).buildFridge
+local buildStove = require(script.Parent.Builders).buildStove
+local buildToilet = require(script.Parent.Builders).buildToilet
+local buildBathtub = require(script.Parent.Builders).buildBathtub
+local buildProp = require(script.Parent.Builders).buildProp
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+local r1 = require(script.Parent.Geometry).r1
+local findInst = require(script.Parent.Geometry).findInst
+local bboxOf = require(script.Parent.Geometry).bboxOf
+local camera = require(script.Parent.Geometry).camera
+local getBBox = require(script.Parent.Geometry).getBBox
+local partsOf = require(script.Parent.Geometry).partsOf
+local pivotWorld = require(script.Parent.Geometry).pivotWorld
+local describeInst = require(script.Parent.Geometry).describeInst
+local gmerge = require(script.Parent.Gui).gmerge
+local GUI_DEFAULT_THEME = require(script.Parent.Gui).GUI_DEFAULT_THEME
+local buildNode = require(script.Parent.Gui).buildNode
+local watchBuildKit = require(script.Parent.Parametric).watchBuildKit
+local tagBuildKit = require(script.Parent.Parametric).tagBuildKit
+local prepSpec = require(script.Parent.Quality).prepSpec
+local applyQuality = require(script.Parent.Quality).applyQuality
+local recorded = require(script.Parent.Core).recorded
+local BRIDGE_TOKEN = require(script.Parent.Core).BRIDGE_TOKEN
+local Lighting = require(script.Parent.Core).Lighting
+local ChangeHistoryService = require(script.Parent.Core).ChangeHistoryService
+local RUNTIME_SOURCE = require(script.Parent.Core).RUNTIME_SOURCE
+local FxParts = require(script.Parent.FxParts)
+local makePart = require(script.Parent.FxParts).makePart
+--#endregion
+
 local VIEW_DIRS = {
 	front = Vector3.new(0, 0.15, 1),
 	back = Vector3.new(0, 0.15, -1),
@@ -2152,3 +2198,6 @@ pcall(function()
 	plugin.Unloading:Connect(restoreLightingIfStashed)
 end)
 
+--#region exports (generated — do not hand-edit)
+return { handlers = handlers, CHEST_LID_SOURCE = CHEST_LID_SOURCE }
+--#endregion

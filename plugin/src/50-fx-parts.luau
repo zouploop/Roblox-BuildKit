@@ -1,3 +1,8 @@
+--#region imports (generated — do not hand-edit)
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+--#endregion
+
 local PART_SHAPES = { box = Enum.PartType.Block, cylinder = Enum.PartType.Cylinder, ball = Enum.PartType.Ball }
 
 -- Pillar 3 (effects): attach a tuned ParticleEmitter (+ additive LightEmission glow) for
@@ -143,3 +148,7 @@ end
 -- A bare model (just this script + attributes) builds itself; an already-built one only
 -- rebuilds when Scale changes. (Scripts don't run in Edit, so edit-time regen still goes
 -- through the plugin watcher — this is the runtime/standalone path.)
+--#region exports (generated — do not hand-edit)
+FxParts.makePart = makePart
+return FxParts
+--#endregion

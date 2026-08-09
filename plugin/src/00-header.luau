@@ -1,3 +1,7 @@
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+--#endregion
+
 --!nocheck
 -- BuildKitPlugin: long-polls the roblox-buildkit MCP server and runs build/camera
 -- commands in the Edit datamodel. Pair with the roblox-buildkit-mcp Node server.
@@ -156,3 +160,14 @@ local function recorded(name, fn)
 	return res
 end
 
+--#region exports (generated — do not hand-edit)
+Core.HttpService = HttpService
+Core.Lighting = Lighting
+Core.ChangeHistoryService = ChangeHistoryService
+Core.BASE = BASE
+Core.PLACE = PLACE
+Core.BRIDGE_TOKEN = BRIDGE_TOKEN
+Core.RUNTIME_SOURCE = RUNTIME_SOURCE
+Core.recorded = recorded
+return Core
+--#endregion

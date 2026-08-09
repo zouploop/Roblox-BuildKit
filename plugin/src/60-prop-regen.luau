@@ -1,3 +1,6 @@
+--#region imports (generated — do not hand-edit)
+--#endregion
+
 local PROP_REGEN_SOURCE = [==[
 local model = script.Parent
 local Http = game:GetService("HttpService")
@@ -76,3 +79,6 @@ if not hasGeom then build() end
 model:GetAttributeChangedSignal("Scale"):Connect(build)
 ]==]
 
+--#region exports (generated — do not hand-edit)
+return { PROP_REGEN_SOURCE = PROP_REGEN_SOURCE }
+--#endregion

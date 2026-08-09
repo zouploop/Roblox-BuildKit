@@ -1,3 +1,13 @@
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local Core = require(script.Parent.Core)
+local HttpService = Core.HttpService
+local BASE = Core.BASE
+local PLACE = Core.PLACE
+local BRIDGE_TOKEN = Core.BRIDGE_TOKEN
+local handlers = require(script.Parent.Handlers).handlers
+--#endregion
+
 -- ---------- long-poll loop ---------------------------------------------------
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
@@ -118,3 +128,6 @@ task.spawn(function()
 	end
 end)
 
+--#region exports (generated — do not hand-edit)
+return { post = post, CONFIG_DEFAULTS = CONFIG_DEFAULTS }
+--#endregion

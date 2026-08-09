@@ -1,3 +1,7 @@
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+--#endregion
+
 -- ===== Quality kit: real-proportion defaults, era presets, weathering, sit-Seats,
 -- bevel + plinth + CSG (opt-in, guarded) ========================================
 -- sane default sizes (studs) per kind so output looks right with no size given.
@@ -124,3 +128,12 @@ end
 -- cylinder/ball/wedge), local pos (offset from the prop origin), size, optional
 -- rotation (deg), color/material/neon/transparency, optional PointLight.
 -- NOTE: a Cylinder's length is along its LOCAL X — rotate to orient it.
+--#region exports (generated — do not hand-edit)
+return {
+	prepSpec = prepSpec,
+	applyQuality = applyQuality,
+	addSitSeat = addSitSeat,
+	bevelTopEdges = bevelTopEdges,
+	plinthBase = plinthBase,
+}
+--#endregion

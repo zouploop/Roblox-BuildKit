@@ -1,3 +1,28 @@
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+local Detail = require(script.Parent.Detail)
+local getOrMakeModel = require(script.Parent.Detail).getOrMakeModel
+local makeCyl = require(script.Parent.Detail).makeCyl
+local makeBall = require(script.Parent.Detail).makeBall
+local roundLeg = require(script.Parent.Detail).roundLeg
+local barPull = require(script.Parent.Detail).barPull
+local roundKnob = require(script.Parent.Detail).roundKnob
+local Parametric = require(script.Parent.Parametric)
+local _regenBusy = require(script.Parent.Parametric)._regenBusy
+local PROP_PRESETS = require(script.Parent.PropPresets).PROP_PRESETS
+local scaleP = require(script.Parent.PropPresets).scaleP
+local csgProp = require(script.Parent.PropPresets).csgProp
+local addSitSeat = require(script.Parent.Quality).addSitSeat
+local bevelTopEdges = require(script.Parent.Quality).bevelTopEdges
+local plinthBase = require(script.Parent.Quality).plinthBase
+local HttpService = require(script.Parent.Core).HttpService
+local recorded = require(script.Parent.Core).recorded
+local makePart = require(script.Parent.FxParts).makePart
+local PROP_REGEN_SOURCE = require(script.Parent.PropRegen).PROP_REGEN_SOURCE
+--#endregion
+
 local function buildProp(spec)
 	local c = spec.center or { 0, 0, 0 }
 	local k = tonumber(spec.scale) or 1
@@ -882,3 +907,25 @@ Parametric.regenBuildKit = function(model)
 	_regenBusy[model] = false
 end
 
+--#region exports (generated — do not hand-edit)
+return {
+	buildSeating = buildSeating,
+	buildRoom = buildRoom,
+	buildStairs = buildStairs,
+	buildSlab = buildSlab,
+	buildCabinet = buildCabinet,
+	buildTable = buildTable,
+	buildShelf = buildShelf,
+	buildBed = buildBed,
+	buildChair = buildChair,
+	buildDesk = buildDesk,
+	buildNightstand = buildNightstand,
+	buildDresser = buildDresser,
+	buildWardrobe = buildWardrobe,
+	buildFridge = buildFridge,
+	buildStove = buildStove,
+	buildToilet = buildToilet,
+	buildBathtub = buildBathtub,
+	buildProp = buildProp,
+}
+--#endregion
