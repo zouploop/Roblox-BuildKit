@@ -175,14 +175,22 @@ function references(masked, name) {
 	return false;
 }
 
-function importedAliases(masked, knownModules) {
+function importedAliases(masked, knownModules, file) {
 	const aliases = new Map();
 	const requires = [];
-	for (const match of masked.matchAll(/local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\(\s*script\.Parent\.([A-Za-z_][A-Za-z0-9_]*)\s*\)(?:\.([A-Za-z_][A-Za-z0-9_]*))?/g)) {
+	const canonicalRequires = new Set();
+	const pattern = /local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\(\s*script\.Parent\.([A-Za-z_][A-Za-z0-9_]*)\s*\)(?:\.([A-Za-z_][A-Za-z0-9_]*))?/g;
+	for (const match of masked.matchAll(pattern)) {
 		const [, alias, target, field] = match;
+		canonicalRequires.add(match.index + match[0].indexOf("require"));
 		aliases.set(alias, { target, field });
 		requires.push({ target, field, alias });
 		if (!knownModules.has(target)) throw new Error(`G3 require target '${target}' not in tree`);
+	}
+	for (const match of masked.matchAll(/\brequire\s*\(/g)) {
+		if (!canonicalRequires.has(match.index)) {
+			throw new Error(`noncanonical require in ${file}: expected local Alias = require(script.Parent.Module)`);
+		}
 	}
 	return { aliases, requires };
 }
@@ -264,12 +272,11 @@ function checkBridgeToken(records, errors) {
 	}
 }
 
-function readFields(source, alias) {
-	const fields = new Set();
+function accessedFields(source, alias) {
+	const fields = [];
 	const pattern = new RegExp(`\\b${alias}\\.([A-Za-z_][A-Za-z0-9_]*)`, "g");
 	for (const match of source.matchAll(pattern)) {
-		if (/^\s*=/.test(source.slice(match.index + match[0].length))) continue;
-		fields.add(match[1]);
+		fields.push({ name: match[1], write: /^\s*=/.test(source.slice(match.index + match[0].length)) });
 	}
 	return fields;
 }
@@ -329,18 +336,25 @@ function checkArtifact(records, errors) {
 
 	const byName = new Map(MODULES.map(([file, name]) => [name, file]));
 	for (const record of records) {
-		const info = importedAliases(record.masked, actual);
+		const info = importedAliases(record.masked, actual, record.file);
 		record.imports = info.aliases;
 		record.requires = info.requires;
 	}
 	for (const record of records) {
 		for (const requirement of record.requires) {
+			if (!requirement.field && requirement.alias !== requirement.target) {
+				errors.push(`G3 whole-module import in ${record.file}: alias '${requirement.alias}' targets '${requirement.target}'; expected '${requirement.alias}'`);
+				continue;
+			}
 			const provider = records.find((item) => byName.get(requirement.target) === item.file);
 			if (!provider) continue;
 			const fields = exportedFields(provider, requirement.target);
-			const requiredFields = requirement.field ? [requirement.field] : readFields(record.masked, requirement.alias);
-			for (const field of requiredFields) if (!fields.has(field)) {
-				errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${field}`);
+			const requiredFields = requirement.field ? [{ name: requirement.field, write: false }] : accessedFields(record.masked, requirement.alias);
+			for (const access of requiredFields) {
+				// Whole-module writes are intentional late-bound table fields; target identity above
+				// validates their provider while reads must already exist in its export footer.
+				if (access.write) continue;
+				if (!fields.has(access.name)) errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${access.name}`);
 			}
 		}
 	}
