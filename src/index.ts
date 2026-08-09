@@ -14,6 +14,7 @@ import { Bridge } from "./bridge.js";
 import { captureWindow } from "./capture.js";
 import { guiNode, normalizeGuiSpec, THEME_NAMES } from "./gui.js";
 import { mapFile, classOf } from "./sync.js";
+import { BUILD_SPEC, validateBatchOps, rgb255, cap } from "./schemas.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CAPTURE_PS1 = path.resolve(__dirname, "..", "scripts", "capture.ps1");
@@ -40,14 +41,6 @@ function errResult(e: unknown) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-// RGB [r,g,b] as 0-255 bytes — the format the plugin's Color3.fromRGB expects and the
-// manifest documents. Enforced here so a caller can't silently drift past the documented
-// range (the plugin clamps, but the contract should match the docs).
-const rgb255 = z.array(z.number().min(0).max(255)).length(3);
-// Documented result caps (mirror of the plugin's clamps) so the manifest and the wire
-// contract agree.
-const cap = (max: number) => z.number().int().min(1).max(max);
-
 // Short timeout for scene-teardown calls. The plugin was already proven alive at
 // save_camera, so on the failure path (plugin died mid-capture) a full 30s wait per
 // restore would turn one failed capture into a multi-minute hang. Run them in parallel
@@ -66,6 +59,17 @@ const FRAME_MS = 12_000;
 // right Studio window when several are open (matches the bridge's command routing).
 function shot(viewport?: any) {
   return captureWindow(CAPTURE_PS1, viewport, bridge.getActivePlace() ?? undefined);
+}
+
+// The ~30 plain dispatch tools all share the same shape: send a command, return its
+// result as text, or wrap the error. This helper collapses that boilerplate — a tool
+// handler becomes `async (a) => run("action", a, 60_000)`.
+async function run(action: string, args: unknown, timeoutMs = 30_000) {
+  try {
+    return textResult(await bridge.sendCommand(action, args, timeoutMs));
+  } catch (e) {
+    return errResult(e);
+  }
 }
 
 const server = new McpServer({ name: "roblox-buildkit", version: SERVER_VERSION });
@@ -273,159 +277,9 @@ server.registerTool(
     description: "Return bounding-box center/size, part count, and immediate children of a target (or whole workspace).",
     inputSchema: { target: z.string().optional() },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("inspect", { target: a.target }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
-);
+  async (a) => run("inspect", { target: a.target })
 
-// --- build: parametric primitives --------------------------------------------
-// The build spec schema, shared by rbx_build (wrapped under `spec`) and rbx_batch
-// (build op args are the spec fields DIRECTLY). One source of truth so the batch
-// path can't drift from the single-build path. Exported for the test suite.
-export const BUILD_SPEC = z
-  .object({
-    kind: z.enum([
-      "slab", "room", "stairs", "cabinet", "table", "shelf", "bed",
-      "chair", "sofa", "armchair", "desk", "nightstand", "dresser", "wardrobe",
-      "fridge", "stove", "toilet", "bathtub", "prop",
-    ]),
-    parts: z
-      .array(
-        z
-          .object({
-            shape: z.enum(["box", "cylinder", "ball", "wedge"]).optional().describe("Default box. Cylinder length is along its LOCAL X — use rot to orient."),
-            pos: z.array(z.number()).length(3).optional().describe("[x,y,z] offset from center. Default [0,0,0]."),
-            size: z.array(z.number()).length(3),
-            rot: z.array(z.number()).length(3).optional().describe("[rx,ry,rz] degrees."),
-            color: rgb255.optional(),
-            material: z.string().optional(),
-            transparency: z.number().optional(),
-            neon: z.boolean().optional().describe("Material=Neon (glows)."),
-            canCollide: z.boolean().optional(),
-            negate: z.boolean().optional().describe("with spec.csg: SUBTRACT this part from the union (hollow out mugs/cups/bowls)."),
-            name: z.string().optional(),
-            light: z
-              .object({
-                color: rgb255.optional(),
-                brightness: z.number().optional(),
-                range: z.number().optional(),
-              })
-              .passthrough()
-              .optional()
-              .describe("Attach a PointLight to this part."),
-            fx: z
-              .union([
-                z.enum(["fire", "smoke", "magic", "energy", "sparkle"]),
-                z
-                  .object({
-                    preset: z.enum(["fire", "smoke", "magic", "energy", "sparkle"]).optional(),
-                    color: rgb255.optional().describe("[r,g,b] flat tint override."),
-                    rate: z.number().optional(),
-                    speed: z.number().optional(),
-                    size: z.number().optional().describe("multiplier on particle size."),
-                    texture: z.string().optional(),
-                  })
-                  .passthrough(),
-              ])
-              .optional()
-              .describe("Attach a tuned ParticleEmitter (+glow): 'fire'/'smoke'/'magic'/'energy'/'sparkle', or an object with overrides. Use for torches, magic orbs, energy cores, braziers."),
-          })
-          .passthrough()
-      )
-      .optional()
-      .describe("prop: primitive parts composed into one model (each pos is relative to center). Build any small prop without a dedicated kind."),
-    prop: z
-      .enum([
-        "mug", "bottle", "glass", "ashtray", "tablelamp", "floorlamp", "book",
-        "bookstack", "plate", "candle", "pictureframe", "clock", "telephone", "radio",
-        "smartphone", "laptop", "tv", "desklamp", "trashcan", "knifeblock", "vase", "teapot",
-        "desktop", "alarmclock", "retropc", "digitalclock", "gamingpc", "drone", "crate", "chest",
-        "sword", "shield", "torch", "coinstack", "holoorb", "lootbox", "barrel", "potion",
-        "toaster", "bowl", "candlestick", "transistor", "crttv", "speaker", "axe", "microwave",
-        "wineglass", "kettle", "pottedplant", "lantern", "ereader", "travelmug",
-        "futurecup", "winebottle", "holotv", "candelabra", "tankard", "mace",
-      ])
-      .optional()
-      .describe("prop preset: a ready-made multi-part prop (noir set-dressing). With this you can omit `parts`. `color` overrides the hero colour; `scale` resizes."),
-    scale: z.number().optional().describe("prop: uniform scale multiplier (default 1). Editable later via the Scale attribute (rebuilds in place)."),
-    seats: z.number().optional().describe("sofa: number of seat cushions (default 3)."),
-    drawers: z.number().optional().describe("nightstand: drawer count (default 2)."),
-    columns: z.number().optional().describe("dresser: drawer columns (default 2)."),
-    rows: z.number().optional().describe("dresser: drawer rows per column (default 3)."),
-    cushionColor: rgb255.optional().describe("sofa/armchair: [r,g,b] cushion color."),
-    cooktopColor: rgb255.optional().describe("stove: [r,g,b] cooktop color."),
-    style: z.string().optional().describe("cabinet: 'shaker' for frame+panel doors (else flat)."),
-    shelves: z.number().optional().describe("shelf: number of shelf boards; also fridge interior shelf count (default 3). Cabinet door sections use per-section `shelves`."),
-    panelColor: rgb255.optional().describe("cabinet shaker: [r,g,b] door panel color."),
-    mattressColor: rgb255.optional().describe("bed: [r,g,b] mattress color."),
-    name: z.string().optional(),
-    center: z.array(z.number()).length(3).describe("[x,y,z] center of the volume (prop: the origin parts offset from)."),
-    size: z.array(z.number()).length(3).optional().describe("[width,height,depth]. Required for all kinds except 'prop' (which uses per-part sizes)."),
-    thickness: z.number().optional().describe("Wall/slab thickness (cabinet: carcass panel thickness, default 0.4)."),
-    material: z.string().optional().describe("Roblox Material enum name, e.g. Brick, Concrete, WoodPlanks."),
-    color: rgb255.optional().describe("[r,g,b] 0-255."),
-    parent: z.string().optional().describe("Name of an existing model to parent into; else a new model in workspace."),
-    front: z
-      .array(
-        z.object({
-          type: z.enum(["drawers", "doors"]),
-          count: z.number(),
-          shelves: z.number().optional().describe("doors section: N interior shelves behind the doors (omit for empty, e.g. under a sink)."),
-        })
-      )
-      .optional()
-      .describe("cabinet: front layout, left→right sections. e.g. [{type:'drawers',count:3},{type:'doors',count:2,shelves:2}]."),
-    toeKick: z.boolean().optional().describe("cabinet: recessed base plinth."),
-    preset: z
-      .enum(["victorian", "midcentury", "rustic", "modern", "artdeco"])
-      .optional()
-      .describe("era/style preset — bundles color/material/style/hardware (your explicit fields still win)."),
-    weather: z.boolean().optional().describe("subtle per-part color variation so surfaces aren't dead-flat uniform."),
-    csg: z.boolean().optional().describe("union the static carcass into one smooth shell via CSG (drawers/doors/sink stay separate; guarded — falls back to parts on any failure)."),
-    plinth: z.boolean().optional().describe("dresser/case goods: add a 2-tier plinth base."),
-    bevel: z.boolean().optional().describe("table: chamfer the top edges (WedgePart, no CSG)."),
-    bullnose: z.boolean().optional().describe("cabinet+countertop: rounded front edge (cylinder nose) — KitchenUnit-style smooth counter."),
-    countertop: z.boolean().optional().describe("cabinet: add a slab countertop on top."),
-    backsplash: z.boolean().optional().describe("cabinet: add a backsplash (needs countertop)."),
-    sink: z
-      .object({
-        width: z.number().optional(),
-        depth: z.number().optional(),
-        offset: z.number().optional().describe("x offset of the basin from cabinet center."),
-        basinDepth: z.number().optional(),
-        basinColor: rgb255.optional(),
-        faucet: z.boolean().optional().describe("default true."),
-        apron: z.boolean().optional().describe("farmhouse apron sink: a big exposed white basin front flush at the cabinet face (hero element)."),
-      })
-      .optional()
-      .describe(
-        "cabinet+countertop: cut a basin hole THROUGH the counter + carcass top and drop in a sink (basin walls/bottom + gooseneck faucet) so it isn't capped by counter blocks. width/depth in studs (default ~55% inner width × D-1.2). Put doors (or nothing), not drawers, in the section under the sink."
-      ),
-    hardwareColor: rgb255.optional().describe("cabinet: [r,g,b] for pulls/knobs (default aged brass)."),
-    interiorColor: rgb255.optional().describe("cabinet: [r,g,b] for drawer trays/interior."),
-    door: z
-      .object({ wall: z.enum(["front", "back", "left", "right"]), width: z.number(), height: z.number() })
-      .optional(),
-    windows: z
-      .array(
-        z.object({
-          wall: z.enum(["front", "back", "left", "right"]),
-          width: z.number(),
-          height: z.number(),
-          sill: z.number(),
-          offset: z.number().optional().describe("Lateral offset from wall center."),
-        })
-      )
-      .optional(),
-    floor: z.boolean().optional(),
-    ceiling: z.boolean().optional(),
-    steps: z.number().optional().describe("stairs: number of steps."),
-  })
-  .passthrough();
+);
 
 server.registerTool(
   "rbx_build",
@@ -474,13 +328,8 @@ server.registerTool(
       anchored: z.boolean().optional().describe("Anchor all inserted parts. Default true."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("insert", a, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("insert", a, 60_000)
+
 );
 
 // --- GUI: build a styled ScreenGui + render an edit-time preview --------------
@@ -557,13 +406,8 @@ server.registerTool(
     description: "Toggle scene lighting: 'day' for bright neutral capture, 'noir' to restore a dark moody look.",
     inputSchema: { mode: z.enum(["day", "noir"]) },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("set_lighting", { mode: a.mode }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("set_lighting", { mode: a.mode })
+
 );
 
 // --- frame: compute camera coords WITHOUT moving the camera ------------------
@@ -624,13 +468,8 @@ server.registerTool(
       anchored: z.boolean().optional().describe("anchor: true to anchor every part (default), false to unanchor. Fixes rbx_qa unanchored warnings."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("edit", a, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("edit", a, 60_000)
+
 );
 
 // --- qa: geometric lint ------------------------------------------------------
@@ -651,13 +490,8 @@ server.registerTool(
       fit: z.boolean().optional().describe("Also report cross-assembly fit-gaps: different sub-models whose faces nearly meet but don't touch (a piece that should sit snug but leaves a slot). Opt-in; verify vs a capture."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("qa", { target: a.target, fix: a.fix ?? false, fit: a.fit ?? false }, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("qa", { target: a.target, fix: a.fix ?? false, fit: a.fit ?? false }, 60_000)
+
 );
 
 // --- undo/redo Studio waypoints ----------------------------------------------
@@ -671,13 +505,8 @@ server.registerTool(
       redo: z.boolean().optional().describe("Redo instead of undo. Default false."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("undo", { steps: a.steps ?? 1, redo: a.redo ?? false }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("undo", { steps: a.steps ?? 1, redo: a.redo ?? false })
+
 );
 
 // --- batch: many build/edit ops as one undo step + one round trip -----------
@@ -685,25 +514,6 @@ server.registerTool(
 // the SAME spec schema rbx_build uses, so a malformed op (bad size, unknown kind) is
 // rejected here with an actionable message + op index instead of reaching the plugin and
 // throwing a cryptic error (or worse, silently building wrong geometry through the
-// plugin's clamped-size fallback). Exported for the test suite.
-export function validateBatchOps(
-  ops: { action: "build" | "edit"; args: Record<string, unknown> }[]
-): { action: "build" | "edit"; args: unknown }[] {
-  return ops.map((op, i) => {
-    if (op.action === "build") {
-      const spec = BUILD_SPEC.safeParse(op.args ?? {});
-      if (!spec.success) {
-        const first = spec.error.issues[0];
-        throw new Error(
-          `rbx_batch op ${i + 1} (build): ${first?.path?.join(".") || "spec"} — ${first?.message ?? "invalid"}. ` +
-            `Each build op is {action:'build',args:{kind:'chair',center:[x,y,z],size:[w,h,d]}}.`
-        );
-      }
-      return { action: "build" as const, args: spec.data };
-    }
-    return op;
-  });
-}
 
 server.registerTool(
   "rbx_batch",
@@ -747,13 +557,8 @@ server.registerTool(
       depth: z.number().int().min(0).max(4).optional().describe("Child recursion depth 0-4. Default 1."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("describe", { target: a.target, depth: a.depth ?? 1 }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("describe", { target: a.target, depth: a.depth ?? 1 })
+
 );
 
 // --- selection bridge: read what the user clicked / show what you mean -------
@@ -769,13 +574,8 @@ server.registerTool(
       target: z.string().optional().describe("set: instance name to select (recursive)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("selection", { mode: a.mode, target: a.target }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("selection", { mode: a.mode, target: a.target })
+
 );
 
 // --- measure: distance/delta between two points ------------------------------
@@ -791,13 +591,8 @@ server.registerTool(
       b: z.union([z.string(), z.array(z.number()).length(3)]).describe("Instance name or [x,y,z]."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("measure", { a: a.a, b: a.b }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("measure", { a: a.a, b: a.b })
+
 );
 
 // --- find: query the scene instead of guessing exact names -------------------
@@ -828,13 +623,8 @@ server.registerTool(
       limit: cap(500).optional().describe("Max results (default 50, cap 500)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("find", a, 15_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("find", a, 15_000)
+
 );
 
 // --- cast: raycast / volume overlap query ------------------------------------
@@ -856,13 +646,8 @@ server.registerTool(
       limit: cap(500).optional().describe("box/sphere: max parts (default 50, cap 500)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("cast", a, 15_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("cast", a, 15_000)
+
 );
 
 // --- script: READ Luau source (the read side sync never had) -----------------
@@ -881,13 +666,8 @@ server.registerTool(
       limit: cap(500).optional().describe("find: max matches (default 100, cap 500)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("script", a, 15_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("script", a, 15_000)
+
 );
 
 // --- prop: get/set/list ANY property (rbx_attr is Attributes only) ------------
@@ -905,13 +685,8 @@ server.registerTool(
       names: z.array(z.string()).optional().describe("list: which properties to read (default: common BasePart props)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("prop", a, 15_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("prop", a, 15_000)
+
 );
 
 // --- group: wrap parts into a Model / ungroup / weld -------------------------
@@ -931,13 +706,8 @@ server.registerTool(
       anchored: z.boolean().optional().describe("weld: anchor the root part (default true)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("group", a, 30_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("group", a, 30_000)
+
 );
 
 // --- console: read Studio LogService output ----------------------------------
@@ -953,13 +723,8 @@ server.registerTool(
       filter: z.string().optional().describe("Only lines containing this substring."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("console", a, 15_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("console", a, 15_000)
+
 );
 
 // --- checkpoint: hard savepoint clone in ServerStorage -----------------------
@@ -976,13 +741,8 @@ server.registerTool(
       target: z.string().optional().describe("save: instance name to snapshot."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("checkpoint", { mode: a.mode, name: a.name, target: a.target }, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("checkpoint", { mode: a.mode, name: a.name, target: a.target }, 60_000)
+
 );
 
 // --- isolate: hide everything except the target (bracket a clean capture) ----
@@ -998,13 +758,8 @@ server.registerTool(
       target: z.string().optional().describe("on: instance to keep visible (recursive)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("isolate", { mode: a.mode, target: a.target }, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("isolate", { mode: a.mode, target: a.target }, 60_000)
+
 );
 
 // --- restore: sweep-undo every outstanding hide/recolor ----------------------
@@ -1040,13 +795,8 @@ server.registerTool(
       target: z.string().optional().describe("on: instance to annotate (recursive)."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("annotate", { mode: a.mode, target: a.target }));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("annotate", { mode: a.mode, target: a.target })
+
 );
 
 // --- place routing: pin commands to one Studio when several are open ---------
@@ -1166,13 +916,8 @@ server.registerTool(
       visualize: z.boolean().optional().describe("Draw the path under workspace.BuildKitNavPath (delete the folder to clear). Default false."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("navcheck", a, 30_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("navcheck", a, 30_000)
+
 );
 
 // --- tag: CollectionService gameplay wiring ----------------------------------
@@ -1188,13 +933,8 @@ server.registerTool(
       tag: z.string().optional().describe("add/remove/query: the tag name."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("tag", a));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("tag", a)
+
 );
 
 // --- attr: instance attributes -----------------------------------------------
@@ -1214,13 +954,8 @@ server.registerTool(
         .describe("set: the value. A 3-number array becomes a Vector3."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("attr", a));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("attr", a)
+
 );
 
 // --- diff: compare two trees / checkpoints -----------------------------------
@@ -1235,13 +970,8 @@ server.registerTool(
       b: z.string().describe("Checkpoint name or instance name (the 'after')."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("diff", a, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("diff", a, 60_000)
+
 );
 
 // --- optimize: performance / streaming audit ---------------------------------
@@ -1256,13 +986,8 @@ server.registerTool(
       fix: z.boolean().optional().describe("Lower Precise MeshPart CollisionFidelity to Box (one undo step). Default false."),
     },
   },
-  async (a) => {
-    try {
-      return textResult(await bridge.sendCommand("optimize", a, 60_000));
-    } catch (e) {
-      return errResult(e);
-    }
-  }
+  async (a) => run("optimize", a, 60_000)
+
 );
 
 // --- sync: push disk .luau file(s) into Studio ---

@@ -1,9 +1,9 @@
-// Tests for the tool layer in src/index.ts. Importing the module registers all tools on
-// its McpServer but (thanks to the `isMain` guard at the bottom) does NOT start a bridge.
-// We assert on the exported BUILD_SPEC schema and the batch build-op validation — the
-// behaviors that previously reached the plugin unvalidated.
+// Tests for the pure schema + batch-validation layer. BUILD_SPEC and validateBatchOps
+// moved to src/schemas.ts (a module with no side effects), so these tests load only that
+// module — not the MCP server — and pin the validation behavior that used to reach the
+// plugin unvalidated.
 import { describe, it, expect } from "vitest";
-import { BUILD_SPEC, validateBatchOps } from "../src/index.js";
+import { BUILD_SPEC, validateBatchOps } from "../src/schemas.js";
 
 describe("BUILD_SPEC (shared by rbx_build and rbx_batch)", () => {
   it("accepts a valid chair spec", () => {

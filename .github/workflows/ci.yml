@@ -13,8 +13,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -39,19 +39,22 @@ jobs:
         run: node scripts/check-plugin.mjs
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
-  # headless binary, so this runs fine without Studio. The modules have a
-  # legacy warning backlog, so this job is warn-only for now: it surfaces the count without
-  # blocking merges. Bump to fail-on-warning once the backlog is cleared.
+  # headless binary, so this runs fine without Studio. Fail on real errors (parse failures,
+  # undefined vars); the legacy warning backlog is non-fatal but printed so it can't silently
+  # regress. Tighten to fail-on-warning as the backlog clears.
   luau-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Selene
         run: |
           curl -sL https://github.com/Kampfkarren/selene/releases/download/0.31.0/selene-0.31.0-linux.zip -o selene.zip
           unzip -o selene.zip
           sudo mv selene /usr/local/bin/
+          sudo chmod +x /usr/local/bin/selene
       - name: Lint the Luau plugin
         run: |
           # Lint each ModuleScript now that its imports and exports define its scope.
-          selene plugin/src --config selene.toml 2>&1 || true
+          # Historically warn-only via `|| true`, which masked real errors. Now: fail on
+          # genuine errors, pass on the legacy warning backlog, and print output directly.
+          selene plugin/src --config selene.toml --allow-warnings

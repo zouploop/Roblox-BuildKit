@@ -111,6 +111,7 @@ export class Bridge {
       this.pending.delete(id);
     }
     for (const w of this.waiters.splice(0)) w.fn(null);
+    this.queue = []; // never dispatch queued-but-abandoned commands after shutdown
     const server = this.server;
     this.server = undefined;
     if (!server) return;
@@ -199,6 +200,11 @@ export class Bridge {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        // Dequeue if still queued (never handed to a poller yet): a timed-out command
+        // that stays in the queue would be dispatched late by the next poller, run its
+        // mutation in Studio with nobody awaiting the result, and strand the scene
+        // (exactly what the capture teardown discipline exists to prevent).
+        this.queue = this.queue.filter((c) => c.id !== id);
         const where = cmd.targetPlace ? ` for place "${cmd.targetPlace}"` : "";
         const hint =
           ctx === "runtime"

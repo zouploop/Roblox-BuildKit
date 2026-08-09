@@ -1,5 +1,5 @@
 # Selene config for the BuildKit Luau ModuleScripts in plugin/src/.
-# The modules inherit a legacy warning backlog, so CI reports the count but stays warn-only.
+# The modules inherit a legacy warning backlog, so CI reports the count but fails on errors.
 # Tighten lints as the module code is cleaned up; the blocking scope oracle remains separate.
 std = "roblox"
 
