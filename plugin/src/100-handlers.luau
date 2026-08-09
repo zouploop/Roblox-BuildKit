@@ -42,7 +42,6 @@ local Lighting = require(script.Parent.Core).Lighting
 local ChangeHistoryService = require(script.Parent.Core).ChangeHistoryService
 local RUNTIME_SOURCE = require(script.Parent.Core).RUNTIME_SOURCE
 local FxParts = require(script.Parent.FxParts)
-local makePart = require(script.Parent.FxParts).makePart
 --#endregion
 
 local VIEW_DIRS = {

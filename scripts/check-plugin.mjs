@@ -8,8 +8,6 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcDir = path.join(root, "plugin", "src");
 const artifact = path.join(root, "plugin", "BuildKitPlugin.rbxmx");
-const flat = process.argv.includes("--flat");
-
 const FILES = [
 	"00-header.luau",
 	"10-geometry.luau",
@@ -94,19 +92,6 @@ type typeof tostring tonumber select pairs ipairs next pcall xpcall error warn a
 rawequal unpack print time tick wait spawn delay elapsedTime shared settings UserSettings`.split(/\s+/));
 const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g;
 const S2_TABLES = new Set(["Core", "Detail", "Parametric", "FxParts"]);
-const S1_CROSS_SYMBOLS = new Set([
-	"BASE", "BRIDGE_TOKEN", "BUILDERS", "CHEST_LID_SOURCE", "CONFIG_DEFAULTS", "ChangeHistoryService", "GUI_DEFAULT_THEME",
-	"HttpService", "Lighting", "PLACE", "PROP_PRESETS", "PROP_REGEN_SOURCE", "RUNNING", "RUNTIME_SOURCE", "_regenBusy",
-	"_regenTarget", "addSitSeat", "applyQuality", "barPull", "bboxOf", "bevelTopEdges", "buildBathtub", "buildBed",
-	"buildCabinet", "buildChair", "buildDesk", "buildDresser", "buildFridge", "buildNightstand", "buildNode", "buildProp",
-	"buildRoom", "buildSeating", "buildShelf", "buildSlab", "buildStairs", "buildStove", "buildTable", "buildToilet",
-	"buildWardrobe", "buildWarnings", "camera", "colorOf", "csgProp", "describeInst", "findInst", "getBBox",
-	"getOrMakeModel", "gmerge", "handlers", "makeBall", "makeBox", "makeCyl", "makePart", "matOf", "partsOf",
-	"pivotWorld", "plinthBase", "post", "prepSpec", "r1", "recorded", "regenBuildKit", "roundKnob", "roundLeg",
-	"scaleP", "scanBuildKit", "tagBuildKit", "toolbar", "watchBuildKit",
-]);
-const S2_REMOVED = new Set(["RUNNING", "_regenTarget", "buildWarnings", "regenBuildKit", "BUILDERS"]);
-const S2_ADDED = new Set(["Core", "Detail", "FxParts", "Parametric"]);
 
 function hide(value) {
 	return value.replace(/[^\n]/g, " ");
@@ -214,15 +199,10 @@ function moduleRecords() {
 	return records;
 }
 
-function unresolved(records, flatMode) {
-	const globalNames = new Set(GLOBALS);
-	for (const record of records) for (const name of record.all) globalNames.add(name);
+function unresolved(records) {
 	const errors = [];
 	for (const record of records) {
-		let known = globalNames;
-		if (!flatMode) {
-			known = new Set([...GLOBALS, ...record.all, ...record.imports.keys()]);
-		}
+		const known = new Set([...GLOBALS, ...record.all, ...record.imports.keys()]);
 		for (const [lineNo, line] of record.masked.split("\n").entries()) {
 			for (const token of tokens(line)) {
 				if (KEYWORDS.has(token.name) || known.has(token.name)) continue;
@@ -281,6 +261,37 @@ function checkBridgeToken(records, errors) {
 	}
 }
 
+function exportedFields(record) {
+	const fields = new Set();
+	const footerStart = record.source.indexOf("--#region exports");
+	const source = footerStart >= 0 ? record.source.slice(footerStart) : record.source;
+	for (const match of source.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) fields.add(match[1]);
+	for (const match of source.matchAll(/\breturn\s*\{([\s\S]*?)\}/g)) {
+		for (const field of match[1].matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) fields.add(field[1]);
+	}
+	return fields;
+}
+
+function requireCycleCount(records, byName) {
+	const visiting = new Set();
+	const visited = new Set();
+	let cycles = 0;
+	function visit(name) {
+		if (visiting.has(name)) {
+			cycles += 1;
+			return;
+		}
+		if (visited.has(name)) return;
+		visiting.add(name);
+		const record = records.find((item) => byName.get(name) === item.file);
+		for (const requirement of record?.requires ?? []) visit(requirement.target);
+		visiting.delete(name);
+		visited.add(name);
+	}
+	for (const name of byName.keys()) visit(name);
+	return cycles;
+}
+
 function checkArtifact(records, errors) {
 	const xml = readFileSync(artifact, "utf8");
 	const referents = [...xml.matchAll(/\breferent="([^"]+)"/g)].map((match) => match[1]);
@@ -304,57 +315,39 @@ function checkArtifact(records, errors) {
 
 	const byName = new Map(MODULES.map(([file, name]) => [name, file]));
 	for (const record of records) {
-		const info = importedAliases(record.masked, expected);
+		const info = importedAliases(record.masked, actual);
 		record.imports = info.aliases;
 		record.requires = info.requires;
 	}
-	const visiting = new Set();
-	const visited = new Set();
-	function visit(name) {
-		if (visiting.has(name)) return true;
-		if (visited.has(name)) return false;
-		visiting.add(name);
-		const record = records.find((item) => byName.get(name) === item.file);
-		for (const requirement of record?.requires ?? []) if (visit(requirement.target)) return true;
-		visiting.delete(name);
-		visited.add(name);
-		return false;
+	for (const record of records) {
+		for (const requirement of record.requires) {
+			if (!requirement.field) continue;
+			const provider = records.find((item) => byName.get(requirement.target) === item.file);
+			if (!provider || !exportedFields(provider).has(requirement.field)) {
+				errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${requirement.field}`);
+			}
+		}
 	}
-	if ([...expected].some((name) => visit(name))) errors.push("G3 require graph has a cycle");
+	return requireCycleCount(records, byName);
 }
 
 const records = moduleRecords();
 const errors = [];
-if (!flat) {
-	try {
-		checkArtifact(records, errors);
-	} catch (error) {
-		errors.push(`G3 ${error.message}`);
-	}
+let cycles = 0;
+try {
+	cycles = checkArtifact(records, errors);
+} catch (error) {
+	errors.push(`G3 ${error.message}`);
 }
 
 const graph = crossGraph(records);
 const declarationsCount = new Set(records.flatMap((record) => [...record.top])).size;
-const cycles = 0;
-const flatStage2 = records.some((record) => /\bCore\.RUNNING\b/.test(record.source));
-const unresolvedErrors = unresolved(records, flat);
+const unresolvedErrors = unresolved(records);
 if (unresolvedErrors.length) {
 	errors.push(`G2 unresolved identifiers: ${unresolvedErrors.length}`);
 	errors.push(...unresolvedErrors);
-} else {
-	if (flat && !flatStage2 && (declarationsCount !== 150 || graph.symbols.size !== 70 || graph.edges.length !== 28 || cycles !== 0)) {
-		errors.push(`G1 baseline mismatch: declarations=${declarationsCount} cross-module symbols=${graph.symbols.size} edges=${graph.edges.length} cycles=${cycles}`);
-	}
-if (flat && flatStage2) {
-	const removed = [...S1_CROSS_SYMBOLS].filter((name) => !graph.symbols.has(name)).sort();
-	const added = [...graph.symbols].filter((name) => !S1_CROSS_SYMBOLS.has(name)).sort();
-	if (graph.symbols.size !== 69 || declarationsCount !== 150 || cycles !== 0 || removed.join(" ") !== [...S2_REMOVED].sort().join(" ") || added.join(" ") !== [...S2_ADDED].sort().join(" ")) {
-		errors.push(`G2 rebound-symbol graph mismatch: cross-module symbols=${graph.symbols.size}, expected 69`);
-		errors.push(`G2 removed: ${removed.join(" ")}`);
-		errors.push(`G2 added: ${added.join(" ")}`);
-	}
 }
-}
+if (cycles !== 0) errors.push(`G3 require graph cycles=${cycles}`);
 
 checkHandlers(records, errors);
 checkBridgeToken(records, errors);
@@ -365,6 +358,3 @@ if (errors.length) {
 }
 
 console.log(`[check-plugin] declarations=${declarationsCount} cross-module symbols=${graph.symbols.size} edges=${graph.edges.length} cycles=${cycles}`);
-if (flatStage2) {
-	console.log(`[check-plugin] delta removed=${[...S2_REMOVED].sort().join(",")} added=${[...S2_ADDED].sort().join(",")}`);
-}

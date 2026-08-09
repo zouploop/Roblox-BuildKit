@@ -1,8 +1,8 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 --#endregion
 
---!nocheck
 -- BuildKitPlugin: long-polls the roblox-buildkit MCP server and runs build/camera
 -- commands in the Edit datamodel. Pair with the roblox-buildkit-mcp Node server.
 -- Drop this file in: %LOCALAPPDATA%\Roblox\Plugins\
