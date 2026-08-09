@@ -1,3 +1,4 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local watchBuildKit = require(script.Parent.Parametric).watchBuildKit

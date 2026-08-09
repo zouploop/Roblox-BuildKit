@@ -199,7 +199,10 @@ function moduleRecords() {
 	return records;
 }
 
-function unresolved(records) {
+// This is a conservative token scan, not a lexical-scope proof. Nested locals and
+// parameters stay in the declaration inventory; Selene's undefined_variable report
+// is the load-bearing lexical-resolution evidence.
+function staticUnknowns(records) {
 	const errors = [];
 	for (const record of records) {
 		const known = new Set([...GLOBALS, ...record.all, ...record.imports.keys()]);
@@ -209,7 +212,7 @@ function unresolved(records) {
 				const prev = previousNonSpace(line, token.index);
 				if ((prev === "." || prev === ":") && !(prev === "." && line[token.index - 2] === ".")) continue;
 				if (nextNonSpace(line, token.index + token.name.length) === "=") continue;
-				errors.push(`${record.file}:${lineNo + 1} unresolved '${token.name}'`);
+				errors.push(`${record.file}:${lineNo + 1} static scan unknown '${token.name}'`);
 			}
 		}
 	}
@@ -261,12 +264,23 @@ function checkBridgeToken(records, errors) {
 	}
 }
 
-function exportedFields(record) {
+function readFields(source, alias) {
+	const fields = new Set();
+	const pattern = new RegExp(`\\b${alias}\\.([A-Za-z_][A-Za-z0-9_]*)`, "g");
+	for (const match of source.matchAll(pattern)) {
+		if (/^\s*=/.test(source.slice(match.index + match[0].length))) continue;
+		fields.add(match[1]);
+	}
+	return fields;
+}
+
+function exportedFields(record, moduleName) {
 	const fields = new Set();
 	const footerStart = record.source.indexOf("--#region exports");
-	const source = footerStart >= 0 ? record.source.slice(footerStart) : record.source;
-	for (const match of source.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) fields.add(match[1]);
-	for (const match of source.matchAll(/\breturn\s*\{([\s\S]*?)\}/g)) {
+	const footer = footerStart >= 0 ? record.source.slice(footerStart) : "";
+	const table = new RegExp(`\\b${moduleName}\\.([A-Za-z_][A-Za-z0-9_]*)\\s*=`, "g");
+	for (const match of record.source.matchAll(table)) fields.add(match[1]);
+	for (const match of footer.matchAll(/\breturn\s*\{([\s\S]*?)\}/g)) {
 		for (const field of match[1].matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) fields.add(field[1]);
 	}
 	return fields;
@@ -321,10 +335,12 @@ function checkArtifact(records, errors) {
 	}
 	for (const record of records) {
 		for (const requirement of record.requires) {
-			if (!requirement.field) continue;
 			const provider = records.find((item) => byName.get(requirement.target) === item.file);
-			if (!provider || !exportedFields(provider).has(requirement.field)) {
-				errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${requirement.field}`);
+			if (!provider) continue;
+			const fields = exportedFields(provider, requirement.target);
+			const requiredFields = requirement.field ? [requirement.field] : readFields(record.masked, requirement.alias);
+			for (const field of requiredFields) if (!fields.has(field)) {
+				errors.push(`G3 missing export: ${record.file} requires ${requirement.target}.${field}`);
 			}
 		}
 	}
@@ -342,10 +358,10 @@ try {
 
 const graph = crossGraph(records);
 const declarationsCount = new Set(records.flatMap((record) => [...record.top])).size;
-const unresolvedErrors = unresolved(records);
-if (unresolvedErrors.length) {
-	errors.push(`G2 unresolved identifiers: ${unresolvedErrors.length}`);
-	errors.push(...unresolvedErrors);
+const staticScanErrors = staticUnknowns(records);
+if (staticScanErrors.length) {
+	errors.push(`G2 conservative static scan unknowns: ${staticScanErrors.length}`);
+	errors.push(...staticScanErrors);
 }
 if (cycles !== 0) errors.push(`G3 require graph cycles=${cycles}`);
 

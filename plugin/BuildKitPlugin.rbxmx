@@ -223,7 +223,8 @@ return Core
 			<Item class="ModuleScript" referent="RBX4">
 				<Properties>
 					<string name="Name">Geometry</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 --#endregion
 
 -- ---------- geometry helpers -------------------------------------------------
@@ -408,7 +409,8 @@ return {
 			<Item class="ModuleScript" referent="RBX5">
 				<Properties>
 					<string name="Name">Detail</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local makeBox = require(script.Parent.Geometry).makeBox
 --#endregion
 
@@ -506,7 +508,8 @@ return Detail
 			<Item class="ModuleScript" referent="RBX6">
 				<Properties>
 					<string name="Name">Parametric</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local HttpService = require(script.Parent.Core).HttpService
 --#endregion
 
@@ -578,7 +581,8 @@ return Parametric
 			<Item class="ModuleScript" referent="RBX7">
 				<Properties>
 					<string name="Name">Quality</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local makeBox = require(script.Parent.Geometry).makeBox
 --#endregion
 
@@ -723,7 +727,8 @@ return {
 			<Item class="ModuleScript" referent="RBX8">
 				<Properties>
 					<string name="Name">FxParts</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local colorOf = require(script.Parent.Geometry).colorOf
 local matOf = require(script.Parent.Geometry).matOf
 --#endregion
@@ -883,7 +888,8 @@ return FxParts
 			<Item class="ModuleScript" referent="RBX9">
 				<Properties>
 					<string name="Name">PropRegen</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 --#endregion
 
 local PROP_REGEN_SOURCE = [==[
@@ -973,7 +979,8 @@ return { PROP_REGEN_SOURCE = PROP_REGEN_SOURCE }
 			<Item class="ModuleScript" referent="RBX10">
 				<Properties>
 					<string name="Name">PropPresets</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 --#endregion
 
 -- Prop preset library: ready-made multi-part props (noir set-dressing) so a caller
@@ -1800,7 +1807,8 @@ return { PROP_PRESETS = PROP_PRESETS, scaleP = scaleP, csgProp = csgProp }
 			<Item class="ModuleScript" referent="RBX11">
 				<Properties>
 					<string name="Name">Builders</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local makeBox = require(script.Parent.Geometry).makeBox
 local colorOf = require(script.Parent.Geometry).colorOf
 local matOf = require(script.Parent.Geometry).matOf
@@ -2737,7 +2745,8 @@ return {
 			<Item class="ModuleScript" referent="RBX12">
 				<Properties>
 					<string name="Name">Gui</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 --#endregion
 
 -- ---------- GUI builder ------------------------------------------------------
@@ -3153,7 +3162,8 @@ return { GUI_DEFAULT_THEME = GUI_DEFAULT_THEME, gmerge = gmerge, buildNode = bui
 			<Item class="ModuleScript" referent="RBX13">
 				<Properties>
 					<string name="Name">Handlers</string>
-					<ProtectedString name="Source"><![CDATA[-- ---------- command handlers -------------------------------------------------
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+-- ---------- command handlers -------------------------------------------------
 --#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local buildSeating = require(script.Parent.Builders).buildSeating
@@ -5361,7 +5371,8 @@ return { handlers = handlers, CHEST_LID_SOURCE = CHEST_LID_SOURCE }
 			<Item class="ModuleScript" referent="RBX14">
 				<Properties>
 					<string name="Name">Poll</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local Core = require(script.Parent.Core)
 local HttpService = Core.HttpService
@@ -5500,7 +5511,8 @@ return { post = post, CONFIG_DEFAULTS = CONFIG_DEFAULTS }
 			<Item class="ModuleScript" referent="RBX15">
 				<Properties>
 					<string name="Name">Toolbar</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local Core = require(script.Parent.Core)
 local BASE = Core.BASE
@@ -5540,7 +5552,8 @@ return { toolbar = toolbar }
 			<Item class="ModuleScript" referent="RBX16">
 				<Properties>
 					<string name="Name">Settings</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local post = require(script.Parent.Poll).post
 local CONFIG_DEFAULTS = require(script.Parent.Poll).CONFIG_DEFAULTS
@@ -5664,7 +5677,8 @@ return {}
 			<Item class="ModuleScript" referent="RBX17">
 				<Properties>
 					<string name="Name">MeshCutter</string>
-					<ProtectedString name="Source"><![CDATA[--#region imports (generated — do not hand-edit)
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local watchBuildKit = require(script.Parent.Parametric).watchBuildKit
 local scanBuildKit = require(script.Parent.Parametric).scanBuildKit

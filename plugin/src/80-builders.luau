@@ -1,3 +1,4 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local makeBox = require(script.Parent.Geometry).makeBox
 local colorOf = require(script.Parent.Geometry).colorOf

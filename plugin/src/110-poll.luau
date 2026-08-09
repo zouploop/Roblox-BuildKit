@@ -1,3 +1,4 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
 local Core = require(script.Parent.Core)

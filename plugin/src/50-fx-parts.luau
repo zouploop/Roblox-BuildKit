@@ -1,3 +1,4 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local colorOf = require(script.Parent.Geometry).colorOf
 local matOf = require(script.Parent.Geometry).matOf

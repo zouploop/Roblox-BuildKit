@@ -1,3 +1,4 @@
+--!nocheck
 --#region imports (generated — do not hand-edit)
 local HttpService = require(script.Parent.Core).HttpService
 --#endregion

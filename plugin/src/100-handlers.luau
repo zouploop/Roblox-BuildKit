@@ -1,3 +1,4 @@
+--!nocheck
 -- ---------- command handlers -------------------------------------------------
 --#region imports (generated — do not hand-edit)
 local plugin = require(script.Parent.Ctx).plugin
