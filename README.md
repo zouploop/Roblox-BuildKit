@@ -178,9 +178,10 @@ the bridge suite drives real HTTP with a fake plugin, so the long-poll contract,
 routing, shared-bridge promotion, and the endpoint guards are all exercised for real. The
 Luau plugin needs Studio and isn't covered — change it with corresponding care.
 
-`plugin/BuildKitPlugin.rbxmx` is generated from `plugin/BuildKitPlugin.luau` but tracked so
-users can install without the toolchain: run `npm run build` and commit both together. CI
-fails if they drift.
+The Luau source of truth is the ordered ModuleScripts in `plugin/src/` (`00-` … `140-`).
+`plugin/BuildKitPlugin.rbxmx` is the single generated artifact, tracked so users can install
+without the toolchain: edit `plugin/src/`, run `npm run build`, and commit the regenerated
+artifact. CI fails if it drifts.
 
 ## Notes / limits
 

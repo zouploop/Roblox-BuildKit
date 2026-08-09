@@ -4,6 +4,51 @@
 			<string name="Name">BuildKitPlugin</string>
 			<token name="RunContext">0</token>
 			<ProtectedString name="Source"><![CDATA[--!nocheck
+-- BuildKit's entry Script wires the shared context before loading modules.
+local Modules = script.Modules
+require(Modules.Ctx).plugin = plugin
+require(Modules.Core)
+require(Modules.Geometry)
+require(Modules.Detail)
+require(Modules.Parametric)
+require(Modules.Quality)
+require(Modules.FxParts)
+require(Modules.PropRegen)
+require(Modules.PropPresets)
+require(Modules.Builders)
+require(Modules.Gui)
+require(Modules.Handlers)
+require(Modules.Poll)
+require(Modules.Toolbar)
+require(Modules.Settings)
+require(Modules.MeshCutter)
+]]></ProtectedString>
+		</Properties>
+		<Item class="Folder" referent="RBX1">
+			<Properties>
+				<string name="Name">Modules</string>
+			</Properties>
+			<Item class="ModuleScript" referent="RBX2">
+				<Properties>
+					<string name="Name">Ctx</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+-- Carries the `plugin` handle from the entry Script to the modules. The `plugin` global
+-- is only guaranteed inside the plugin's main Script, so it is passed explicitly rather
+-- than assumed. Required first, before any module that touches plugin settings.
+local Ctx = {}
+Ctx.plugin = nil
+return Ctx
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX3">
+				<Properties>
+					<string name="Name">Core</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+--#endregion
+
 -- BuildKitPlugin: long-polls the roblox-buildkit MCP server and runs build/camera
 -- commands in the Edit datamodel. Pair with the roblox-buildkit-mcp Node server.
 -- Drop this file in: %LOCALAPPDATA%\Roblox\Plugins\
@@ -14,7 +59,8 @@ local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 local BASE = "http://127.0.0.1:44760"
 local PLACE = tostring(game.Name)
-local RUNNING = true
+local Core = {}
+Core.RUNNING = true
 
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
@@ -159,6 +205,27 @@ local function recorded(name, fn)
 	end
 	return res
 end
+
+--#region exports (generated — do not hand-edit)
+Core.HttpService = HttpService
+Core.Lighting = Lighting
+Core.ChangeHistoryService = ChangeHistoryService
+Core.BASE = BASE
+Core.PLACE = PLACE
+Core.BRIDGE_TOKEN = BRIDGE_TOKEN
+Core.RUNTIME_SOURCE = RUNTIME_SOURCE
+Core.recorded = recorded
+return Core
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX4">
+				<Properties>
+					<string name="Name">Geometry</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+--#endregion
 
 -- ---------- geometry helpers -------------------------------------------------
 local function colorOf(arr, default)
@@ -321,6 +388,32 @@ local function makeBox(parent, cx, cy, cz, sx, sy, sz, color, mat, name)
 	return p
 end
 
+--#region exports (generated — do not hand-edit)
+return {
+	colorOf = colorOf,
+	matOf = matOf,
+	findInst = findInst,
+	camera = camera,
+	bboxOf = bboxOf,
+	getBBox = getBBox,
+	partsOf = partsOf,
+	pivotWorld = pivotWorld,
+	r1 = r1,
+	describeInst = describeInst,
+	makeBox = makeBox,
+}
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX5">
+				<Properties>
+					<string name="Name">Detail</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+--#endregion
+
 -- ---------- rounded-detail helpers (fidelity: legs / pulls / knobs / spouts) ----
 -- a Cylinder oriented along an axis: "x" (length = local X, default), "y" (vertical),
 -- "z" (along depth). len = length on that axis; dia = diameter. NOTE rbx_qa reads
@@ -381,10 +474,11 @@ local function roundLeg(parent, x, y0, y1, z, dia, color, mat, name)
 	return makeCyl(parent, x, (y0 + y1) / 2, z, y1 - y0, dia, "y", color, mat, name or "Leg")
 end
 
-local _regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
+local Detail = {}
+Detail._regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
 local function getOrMakeModel(parentName, name)
-	if _regenTarget then
-		return _regenTarget
+	if Detail._regenTarget then
+		return Detail._regenTarget
 	end
 	local parent = workspace
 	if parentName then
@@ -399,14 +493,33 @@ local function getOrMakeModel(parentName, name)
 	return m
 end
 
+--#region exports (generated — do not hand-edit)
+Detail.makeCyl = makeCyl
+Detail.makeBall = makeBall
+Detail.barPull = barPull
+Detail.roundKnob = roundKnob
+Detail.roundLeg = roundLeg
+Detail.getOrMakeModel = getOrMakeModel
+return Detail
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX6">
+				<Properties>
+					<string name="Name">Parametric</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local HttpService = require(script.Parent.Core).HttpService
+--#endregion
+
 -- ===== Parametric furniture: self-describing, editable, plugin-regenerated =======
 -- Each built piece is TAGGED with its spec (Width/Height/Depth/Color attributes + a
 -- BuildKitSpec JSON for nested fields). The plugin WATCHES these models and rebuilds
 -- the geometry in place when an attribute changes — tweak a value in the Properties
 -- panel and it regenerates. (A real engine ProceduralModel only renders when Roblox's
 -- backend created it, so BuildKit acts as the engine here.)
-local regenBuildKit -- forward decl (assigned after the builders are defined)
-local BUILDERS -- forward decl (kind -> builder fn; filled after the builders)
+local Parametric = {}
 local PARAMETRIC_KINDS = {
 	cabinet = true, table = true, shelf = true, bed = true, chair = true, sofa = true,
 	armchair = true, desk = true, nightstand = true, dresser = true, wardrobe = true,
@@ -441,7 +554,7 @@ local function watchBuildKit(model)
 		_pending[model] = true
 		task.defer(function() -- debounce so multi-attribute edits batch into one rebuild
 			_pending[model] = nil
-			if model.Parent and regenBuildKit then regenBuildKit(model) end
+	if model.Parent and Parametric.regenBuildKit then Parametric.regenBuildKit(model) end
 		end)
 	end)
 	model.AncestryChanged:Connect(function()
@@ -454,6 +567,24 @@ local function scanBuildKit()
 		if m:IsA("Model") and m:GetAttribute("BuildKitKind") then watchBuildKit(m) end
 	end
 end
+
+--#region exports (generated — do not hand-edit)
+Parametric._regenBusy = _regenBusy
+Parametric.tagBuildKit = tagBuildKit
+Parametric.watchBuildKit = watchBuildKit
+Parametric.scanBuildKit = scanBuildKit
+return Parametric
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX7">
+				<Properties>
+					<string name="Name">Quality</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+--#endregion
 
 -- ===== Quality kit: real-proportion defaults, era presets, weathering, sit-Seats,
 -- bevel + plinth + CSG (opt-in, guarded) ========================================
@@ -581,6 +712,27 @@ end
 -- cylinder/ball/wedge), local pos (offset from the prop origin), size, optional
 -- rotation (deg), color/material/neon/transparency, optional PointLight.
 -- NOTE: a Cylinder's length is along its LOCAL X — rotate to orient it.
+--#region exports (generated — do not hand-edit)
+return {
+	prepSpec = prepSpec,
+	applyQuality = applyQuality,
+	addSitSeat = addSitSeat,
+	bevelTopEdges = bevelTopEdges,
+	plinthBase = plinthBase,
+}
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX8">
+				<Properties>
+					<string name="Name">FxParts</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+--#endregion
+
 local PART_SHAPES = { box = Enum.PartType.Block, cylinder = Enum.PartType.Cylinder, ball = Enum.PartType.Ball }
 
 -- Pillar 3 (effects): attach a tuned ParticleEmitter (+ additive LightEmission glow) for
@@ -664,7 +816,8 @@ end
 
 -- Non-fatal build warnings (degenerate/oversize/ball-collapse), surfaced in the build result.
 -- handlers.build clears this at the start of each build and merges it into the qa warnings.
-local buildWarnings = {}
+local FxParts = {}
+FxParts.buildWarnings = {}
 local function makePart(parent, ps, ox, oy, oz)
 	local shape = tostring(ps.shape or "box"):lower()
 	local sz = ps.size or { 1, 1, 1 }
@@ -676,13 +829,13 @@ local function makePart(parent, ps, ox, oy, oz)
 	local nm = ps.name or shape
 	for i = 1, 3 do
 		if sz[i] <= 0.001 then
-			buildWarnings[#buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
+			FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("'%s' had a non-positive size axis -> clamped to 0.05", nm)
 			sz[i] = 0.05
 		end
 	end
 	if shape == "ball" and math.max(sz[1], sz[2], sz[3]) - math.min(sz[1], sz[2], sz[3]) > 0.05 then
 		local mean = (sz[1] + sz[2] + sz[3]) / 3
-		buildWarnings[#buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
+		FxParts.buildWarnings[#FxParts.buildWarnings + 1] = string.format("ball '%s' non-uniform [%.2f,%.2f,%.2f] -> Roblox renders a min-axis sphere; made uniform %.2f (use a cylinder/CSG for an elongated round shape)", nm, sz[1], sz[2], sz[3], mean)
 		sz = { mean, mean, mean }
 	end
 	local p
@@ -725,6 +878,20 @@ end
 -- A bare model (just this script + attributes) builds itself; an already-built one only
 -- rebuilds when Scale changes. (Scripts don't run in Edit, so edit-time regen still goes
 -- through the plugin watcher — this is the runtime/standalone path.)
+--#region exports (generated — do not hand-edit)
+FxParts.makePart = makePart
+return FxParts
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX9">
+				<Properties>
+					<string name="Name">PropRegen</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+--#endregion
+
 local PROP_REGEN_SOURCE = [==[
 local model = script.Parent
 local Http = game:GetService("HttpService")
@@ -802,6 +969,19 @@ for _, ch in ipairs(model:GetChildren()) do if ch:IsA("BasePart") then hasGeom =
 if not hasGeom then build() end
 model:GetAttributeChangedSignal("Scale"):Connect(build)
 ]==]
+
+--#region exports (generated — do not hand-edit)
+return { PROP_REGEN_SOURCE = PROP_REGEN_SOURCE }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX10">
+				<Properties>
+					<string name="Name">PropPresets</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+--#endregion
 
 -- Prop preset library: ready-made multi-part props (noir set-dressing) so a caller
 -- can `{kind="prop", prop="lamp"}` instead of hand-listing primitives. Each entry
@@ -1618,6 +1798,41 @@ end
 -- mug, lamp...) without a dedicated kind or execute_luau. Tagged parametric so the
 -- Scale attribute (and spec edits) rebuild it in place like the furniture kinds.
 -- With spec.csg it's instead unioned into one smooth solid (final bake, not parametric).
+--#region exports (generated — do not hand-edit)
+return { PROP_PRESETS = PROP_PRESETS, scaleP = scaleP, csgProp = csgProp }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX11">
+				<Properties>
+					<string name="Name">Builders</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local makeBox = require(script.Parent.Geometry).makeBox
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+local Detail = require(script.Parent.Detail)
+local getOrMakeModel = require(script.Parent.Detail).getOrMakeModel
+local makeCyl = require(script.Parent.Detail).makeCyl
+local makeBall = require(script.Parent.Detail).makeBall
+local roundLeg = require(script.Parent.Detail).roundLeg
+local barPull = require(script.Parent.Detail).barPull
+local roundKnob = require(script.Parent.Detail).roundKnob
+local Parametric = require(script.Parent.Parametric)
+local _regenBusy = require(script.Parent.Parametric)._regenBusy
+local PROP_PRESETS = require(script.Parent.PropPresets).PROP_PRESETS
+local scaleP = require(script.Parent.PropPresets).scaleP
+local csgProp = require(script.Parent.PropPresets).csgProp
+local addSitSeat = require(script.Parent.Quality).addSitSeat
+local bevelTopEdges = require(script.Parent.Quality).bevelTopEdges
+local plinthBase = require(script.Parent.Quality).plinthBase
+local HttpService = require(script.Parent.Core).HttpService
+local recorded = require(script.Parent.Core).recorded
+local makePart = require(script.Parent.FxParts).makePart
+local PROP_REGEN_SOURCE = require(script.Parent.PropRegen).PROP_REGEN_SOURCE
+--#endregion
+
 local function buildProp(spec)
 	local c = spec.center or { 0, 0, 0 }
 	local k = tonumber(spec.scale) or 1
@@ -2458,7 +2673,7 @@ local function buildBathtub(spec)
 end
 
 -- kind -> builder, used by handlers.build AND regenBuildKit (in-place rebuild).
-BUILDERS = {
+local BUILDERS = {
 	cabinet = buildCabinet, table = buildTable, shelf = buildShelf, bed = buildBed, chair = buildChair,
 	sofa = function(s) return buildSeating(s, math.max(2, math.floor(s.seats or 3))) end,
 	armchair = function(s) return buildSeating(s, 1) end,
@@ -2469,7 +2684,7 @@ BUILDERS = {
 -- Rebuild a tagged piece IN PLACE from its current attributes (size/color/center from
 -- live attributes, nested fields from BuildKitSpec). Clears old geometry, builds into
 -- the same model so identity/selection + the attributes survive.
-regenBuildKit = function(model)
+Parametric.regenBuildKit = function(model)
 	local kind = model:GetAttribute("BuildKitKind")
 	local fn = BUILDERS[kind]
 	if not fn or _regenBusy[model] then return end
@@ -2495,12 +2710,44 @@ regenBuildKit = function(model)
 		for _, c in ipairs(model:GetChildren()) do
 			c:Destroy()
 		end
-		_regenTarget = model
+		Detail._regenTarget = model
 		pcall(fn, spec)
-		_regenTarget = nil
+		Detail._regenTarget = nil
 	end)
 	_regenBusy[model] = false
 end
+
+--#region exports (generated — do not hand-edit)
+return {
+	buildSeating = buildSeating,
+	buildRoom = buildRoom,
+	buildStairs = buildStairs,
+	buildSlab = buildSlab,
+	buildCabinet = buildCabinet,
+	buildTable = buildTable,
+	buildShelf = buildShelf,
+	buildBed = buildBed,
+	buildChair = buildChair,
+	buildDesk = buildDesk,
+	buildNightstand = buildNightstand,
+	buildDresser = buildDresser,
+	buildWardrobe = buildWardrobe,
+	buildFridge = buildFridge,
+	buildStove = buildStove,
+	buildToilet = buildToilet,
+	buildBathtub = buildBathtub,
+	buildProp = buildProp,
+}
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX12">
+				<Properties>
+					<string name="Name">Gui</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+--#endregion
 
 -- ---------- GUI builder ------------------------------------------------------
 -- Builds a styled ScreenGui from a component tree. Theme tokens (sent fully
@@ -2906,7 +3153,62 @@ function buildNode(node, theme, layoutDir)
 	return inst
 end
 
+--#region exports (generated — do not hand-edit)
+return { GUI_DEFAULT_THEME = GUI_DEFAULT_THEME, gmerge = gmerge, buildNode = buildNode }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX13">
+				<Properties>
+					<string name="Name">Handlers</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
 -- ---------- command handlers -------------------------------------------------
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local buildSeating = require(script.Parent.Builders).buildSeating
+local buildRoom = require(script.Parent.Builders).buildRoom
+local buildStairs = require(script.Parent.Builders).buildStairs
+local buildSlab = require(script.Parent.Builders).buildSlab
+local buildCabinet = require(script.Parent.Builders).buildCabinet
+local buildTable = require(script.Parent.Builders).buildTable
+local buildShelf = require(script.Parent.Builders).buildShelf
+local buildBed = require(script.Parent.Builders).buildBed
+local buildChair = require(script.Parent.Builders).buildChair
+local buildDesk = require(script.Parent.Builders).buildDesk
+local buildNightstand = require(script.Parent.Builders).buildNightstand
+local buildDresser = require(script.Parent.Builders).buildDresser
+local buildWardrobe = require(script.Parent.Builders).buildWardrobe
+local buildFridge = require(script.Parent.Builders).buildFridge
+local buildStove = require(script.Parent.Builders).buildStove
+local buildToilet = require(script.Parent.Builders).buildToilet
+local buildBathtub = require(script.Parent.Builders).buildBathtub
+local buildProp = require(script.Parent.Builders).buildProp
+local colorOf = require(script.Parent.Geometry).colorOf
+local matOf = require(script.Parent.Geometry).matOf
+local r1 = require(script.Parent.Geometry).r1
+local findInst = require(script.Parent.Geometry).findInst
+local bboxOf = require(script.Parent.Geometry).bboxOf
+local camera = require(script.Parent.Geometry).camera
+local getBBox = require(script.Parent.Geometry).getBBox
+local partsOf = require(script.Parent.Geometry).partsOf
+local pivotWorld = require(script.Parent.Geometry).pivotWorld
+local describeInst = require(script.Parent.Geometry).describeInst
+local gmerge = require(script.Parent.Gui).gmerge
+local GUI_DEFAULT_THEME = require(script.Parent.Gui).GUI_DEFAULT_THEME
+local buildNode = require(script.Parent.Gui).buildNode
+local watchBuildKit = require(script.Parent.Parametric).watchBuildKit
+local tagBuildKit = require(script.Parent.Parametric).tagBuildKit
+local prepSpec = require(script.Parent.Quality).prepSpec
+local applyQuality = require(script.Parent.Quality).applyQuality
+local recorded = require(script.Parent.Core).recorded
+local BRIDGE_TOKEN = require(script.Parent.Core).BRIDGE_TOKEN
+local Lighting = require(script.Parent.Core).Lighting
+local ChangeHistoryService = require(script.Parent.Core).ChangeHistoryService
+local RUNTIME_SOURCE = require(script.Parent.Core).RUNTIME_SOURCE
+local FxParts = require(script.Parent.FxParts)
+--#endregion
+
 local VIEW_DIRS = {
 	front = Vector3.new(0, 0.15, 1),
 	back = Vector3.new(0, 0.15, -1),
@@ -4832,7 +5134,7 @@ function handlers.build(spec)
 	end
 	return recorded("BuildKit build " .. tostring(spec.kind), function()
 		prepSpec(spec) -- apply era preset + real-proportion default size before building
-		buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
+		FxParts.buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
 		local model
 		if spec.kind == "room" then
 			model = buildRoom(spec)
@@ -4907,7 +5209,7 @@ function handlers.build(spec)
 			end
 			-- D: surface primitive guards (ball-collapse / degenerate) + prop oversize, even if auto-QA off.
 			local extra = {}
-			for _, w in ipairs(buildWarnings) do extra[#extra + 1] = w end
+			for _, w in ipairs(FxParts.buildWarnings) do extra[#extra + 1] = w end
 			if spec.kind == "prop" then
 				local md = math.max(bsz.X, bsz.Y, bsz.Z)
 				if md > 24 then
@@ -5061,6 +5363,26 @@ pcall(function()
 	plugin.Unloading:Connect(restoreLightingIfStashed)
 end)
 
+--#region exports (generated — do not hand-edit)
+return { handlers = handlers, CHEST_LID_SOURCE = CHEST_LID_SOURCE }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX14">
+				<Properties>
+					<string name="Name">Poll</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local Core = require(script.Parent.Core)
+local HttpService = Core.HttpService
+local BASE = Core.BASE
+local PLACE = Core.PLACE
+local BRIDGE_TOKEN = Core.BRIDGE_TOKEN
+local handlers = require(script.Parent.Handlers).handlers
+--#endregion
+
 -- ---------- long-poll loop ---------------------------------------------------
 -- Optional shared-secret bridge auth: must match the server's BRIDGE_TOKEN (env) or
 -- config "bridgeToken". Blank = legacy trust boundary (localhost, any local process).
@@ -5126,7 +5448,7 @@ end
 task.spawn(function()
 	local backoff = 1.0
 	while true do
-		if not RUNNING then
+	if not Core.RUNNING then
 			task.wait(0.5)
 			continue
 		end
@@ -5181,14 +5503,31 @@ task.spawn(function()
 	end
 end)
 
+--#region exports (generated — do not hand-edit)
+return { post = post, CONFIG_DEFAULTS = CONFIG_DEFAULTS }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX15">
+				<Properties>
+					<string name="Name">Toolbar</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local Core = require(script.Parent.Core)
+local BASE = Core.BASE
+local handlers = require(script.Parent.Handlers).handlers
+--#endregion
+
 -- ---------- toolbar toggle ---------------------------------------------------
 local toolbar = plugin:CreateToolbar("BuildKit")
 local btn = toolbar:CreateButton("BuildKit", "Toggle BuildKit polling", "")
-btn:SetActive(RUNNING)
+btn:SetActive(Core.RUNNING)
 btn.Click:Connect(function()
-	RUNNING = not RUNNING
-	btn:SetActive(RUNNING)
-	print("[BuildKit] polling " .. (RUNNING and "ON" or "OFF"))
+	Core.RUNNING = not Core.RUNNING
+	btn:SetActive(Core.RUNNING)
+	print("[BuildKit] polling " .. (Core.RUNNING and "ON" or "OFF"))
 end)
 
 print("[BuildKit] plugin loaded, polling " .. BASE)
@@ -5204,6 +5543,23 @@ do
 			:format(res.shown, res.recolored))
 	end
 end
+
+--#region exports (generated — do not hand-edit)
+return { toolbar = toolbar }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX16">
+				<Properties>
+					<string name="Name">Settings</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local post = require(script.Parent.Poll).post
+local CONFIG_DEFAULTS = require(script.Parent.Poll).CONFIG_DEFAULTS
+local toolbar = require(script.Parent.Toolbar).toolbar
+--#endregion
 
 -- ---------- settings dock widget --------------------------------------------
 -- A dockable panel for connection creds (Open Cloud key, Creator ID, ComfyUI URL,
@@ -5312,6 +5668,24 @@ if okWidget and widget then
 	local setBtn = toolbar:CreateButton("Settings", "BuildKit settings panel", "")
 	setBtn.Click:Connect(function() widget.Enabled = not widget.Enabled end)
 end
+
+--#region exports (generated — do not hand-edit)
+return {}
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX17">
+				<Properties>
+					<string name="Name">MeshCutter</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local plugin = require(script.Parent.Ctx).plugin
+local watchBuildKit = require(script.Parent.Parametric).watchBuildKit
+local scanBuildKit = require(script.Parent.Parametric).scanBuildKit
+local toolbar = require(script.Parent.Toolbar).toolbar
+local CHEST_LID_SOURCE = require(script.Parent.Handlers).CHEST_LID_SOURCE
+--#endregion
 
 -- ---------- Mesh Cutter (EditableMesh) --------------------------------------
 -- Interactive in-Studio mesh editor: drop a draggable plane on a MeshPart, click Cut, and it
@@ -5504,7 +5878,12 @@ workspace.DescendantAdded:Connect(function(d)
 		end)
 	end
 end)
+--#region exports (generated — do not hand-edit)
+return {}
+--#endregion
 ]]></ProtectedString>
-		</Properties>
+				</Properties>
+			</Item>
+		</Item>
 	</Item>
 </roblox>

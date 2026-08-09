@@ -17,7 +17,8 @@
 !/plugin/
 /plugin/*
 !/plugin/BuildKitPlugin.rbxmx
-!/plugin/BuildKitPlugin.luau
+!/plugin/src/
+!/plugin/src/**
 
 !/src/
 !/src/**
