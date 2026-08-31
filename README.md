@@ -102,6 +102,28 @@ to the page.
 - Click **Frame** to center the camera on the current selection. Explorer's search box
   filters by object name or class, and its disclosure arrows expand or collapse groups.
 
+#### Keyboard shortcuts
+
+These shortcuts work when the renderer is focused. Camera movement works in both Stage and
+Mirror; editing shortcuts are Stage-only because Mirror is read-only.
+
+| Shortcut | Action |
+|---|---|
+| **W/A/S/D** | Move the camera forward/back/left/right relative to its facing direction. |
+| **Q/E** | Move the camera down/up. |
+| **Shift** + camera key | Move the camera faster. |
+| **F** | Activate the Move gizmo. |
+| **R** | Activate the Rotate gizmo. |
+| **G** | Activate the Scale gizmo. |
+| **L** | Lock or unlock the current Stage selection. |
+| **Delete** | Delete the current Stage selection. |
+| **Ctrl+A** | Select everything in Stage. |
+| **Ctrl+C** | Copy the current Stage selection. |
+| **Ctrl+V** | Paste the copied Stage objects. |
+| **Ctrl+D** | Duplicate the current Stage selection. |
+| **Ctrl+Z** | Undo the last Stage action. |
+| **Ctrl+Y** or **Ctrl+Shift+Z** | Redo the last undone Stage action. |
+
 #### Editing objects
 
 - Choose **Move**, **Rotate**, or **Scale** in the toolbar, or press **F**, **R**, or **G**.
