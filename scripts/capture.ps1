@@ -92,20 +92,30 @@ if ($cw -le 0 -or $chgt -le 0) { throw "bad client rect ${cw}x${chgt}" }
 $capX = $cx; $capY = $cy; $capW = $cw; $capH = $chgt
 
 # Crop to just the 3D viewport (drop ribbon + side/bottom docks) if the plugin gave its size.
+# ViewportSize is the render area's pixel size, but Windows may expose the Studio
+# client in logical or physical pixels. Try the exact dimensions first, then the
+# DPI-scaled equivalent. If neither rectangle fits, the initialized whole-window
+# rectangle remains the deliberate backup instead of returning a partial image.
 if ($VpW -gt 0 -and $VpH -gt 0) {
   Add-Type -AssemblyName System.Drawing
   $gfx = [System.Drawing.Graphics]::FromHwnd($h)
   $scale = $gfx.DpiX / 96.0
   $gfx.Dispose()
   if ($scale -le 0) { $scale = 1.0 }
-  $vpwPx = [int]([math]::Round($VpW * $scale))
-  $vphPx = [int]([math]::Round($VpH * $scale))
   $ribbonPx = [int]([math]::Round(135 * $scale))
-  if ($vpwPx -gt 16 -and $vphPx -gt 16 -and $vpwPx -le $cw + 4 -and ($ribbonPx + $vphPx) -le $chgt + 4) {
-    $capX = $cx
-    $capY = $cy + $ribbonPx
-    $capW = [math]::Min($vpwPx, $cw)
-    $capH = [math]::Min($vphPx, $chgt - $ribbonPx)
+  $candidates = @(
+    @([int]$VpW, [int]$VpH, 135),
+    @([int]([math]::Round($VpW * $scale)), [int]([math]::Round($VpH * $scale)), $ribbonPx)
+  )
+  foreach ($candidate in $candidates) {
+    $vpwPx = $candidate[0]; $vphPx = $candidate[1]; $topPx = $candidate[2]
+    if ($vpwPx -gt 16 -and $vphPx -gt 16 -and $vpwPx -le $cw -and $topPx -ge 0 -and ($topPx + $vphPx) -le $chgt) {
+      $capX = $cx
+      $capY = $cy + $topPx
+      $capW = $vpwPx
+      $capH = $vphPx
+      break
+    }
   }
 }
 
