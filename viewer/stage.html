@@ -1,0 +1,4007 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>buildkit live stage</title>
+<style>
+  /* ── Workbench ────────────────────────────────────────────────────────────
+     A staging bench for Roblox geometry. Chrome is derived from the baseplate
+     (cool periwinkle blue-grey) so it reads as sitting BESIDE the viewport
+     rather than as neutral putty around it. Spacing is measured in studs —
+     Roblox's own unit — at 1 stud = 4px. Depth strategy: borders-only, the
+     dense-tool choice; the sole shadow is on genuinely-floating overlays.
+     Selection blue is the ONE accent, reserved for selection + live state,
+     so it never competes with ordinary chrome.                              */
+  :root {
+    color-scheme: dark;
+
+    /* surfaces — one hue throughout, only lightness shifts (a few % per step) */
+    --baseplate:    hsl(232 15% 8%);
+    --chrome:       hsl(232 13% 12%);
+    --chrome-hi:    hsl(232 12% 16%);
+    --control:      hsl(232 16% 9.5%);
+    --control-hi:   hsl(232 14% 14%);
+
+    /* seams — rgba so they blend instead of cutting */
+    --seam:         rgba(158, 172, 214, .13);
+    --seam-soft:    rgba(158, 172, 214, .07);
+    --seam-strong:  rgba(158, 172, 214, .24);
+
+    /* ink — four levels, all used */
+    --ink:          hsl(228 22% 93%);
+    --ink-2:        hsl(228 13% 73%);
+    --ink-3:        hsl(228 11% 54%);
+    --ink-4:        hsl(228 11% 39%);
+
+    /* the one accent: Roblox selection blue */
+    --select:       hsl(207 100% 63%);
+    --select-dim:   rgba(66, 170, 255, .14);
+    --select-edge:  rgba(66, 170, 255, .42);
+
+    /* semantics — desaturated for dark surfaces */
+    --live:         hsl(146 42% 56%);
+    --warn:         hsl(38 74% 62%);
+    --danger:       hsl(6 66% 64%);
+
+    /* studs: 1 stud = 4px */
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px;
+    --r-sm: 3px; --r-md: 5px;
+
+    --ui:   ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+
+    --float: 0 8px 26px rgba(8, 10, 18, .55);
+
+    /* the signature: a baseplate stud grid */
+    --studs: repeating-linear-gradient(0deg, rgba(158,172,214,.07) 0 1px, transparent 1px 12px),
+             repeating-linear-gradient(90deg, rgba(158,172,214,.07) 0 1px, transparent 1px 12px);
+  }
+
+  html, body { margin:0; height:100%; background:var(--baseplate); overflow:hidden; font-family:var(--ui); font-size:12px; color:var(--ink-2); }
+  body > canvas { position: fixed; inset: var(--canvas-top, 0px) var(--canvas-right, 0px) var(--canvas-bottom, 0px) var(--canvas-left, 0px); display: block; width: auto !important; height: auto !important; outline: none; }
+
+  button, input, select { font:inherit; color:var(--ink); background:var(--control); border:1px solid var(--seam); border-radius:var(--r-sm); }
+  button { cursor:pointer; padding:4px var(--s2); color:var(--ink-2); transition:background .09s, border-color .09s, color .09s; }
+  button:hover { background:var(--control-hi); border-color:var(--seam-strong); color:var(--ink); }
+  button:active { background:var(--chrome); }
+  button:disabled { cursor:default; opacity:.4; }
+  button:disabled:hover { background:var(--control); border-color:var(--seam); color:var(--ink-2); }
+  button.active, button[aria-pressed="true"] { color:var(--select); border-color:var(--select-edge); background:var(--select-dim); }
+  input, select { min-width:0; padding:4px 6px; }
+  input::placeholder { color:var(--ink-4); }
+  :focus-visible { outline:2px solid var(--select); outline-offset:1px; }
+
+  /* numbers align — this UI is mostly coordinates */
+  .prop-grid input, .tree-row .meta, .recent-entry-meta, #csg-limit, .generation-status { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  #toolbar { position:fixed; top:var(--s2); left:var(--s2); right:var(--s2); min-height:30px; display:flex; flex-wrap:wrap; align-items:center; align-content:center; gap:var(--s1); padding:var(--s1) var(--s2); box-sizing:border-box; min-width:0; color:var(--ink-2); background:var(--chrome); border:1px solid var(--seam); border-radius:var(--r-md); z-index:25; }
+  #toolbar .spacer { flex:1 1 12px; min-width:12px; }
+  /* clusters by function, via spacing alone — no markup change */
+  #delete, #tool-translate, #options-menu { margin-left:var(--s3); }
+  #toolbar .status { flex:1 1 180px; min-width:120px; color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #toolbar .status.error { color:var(--danger); }
+  #toolbar .status.ok { color:var(--live); }
+  /* the border crossing into a live place — the only filled control here */
+  #commit { color:hsl(228 40% 8%); background:var(--select); border-color:var(--select); font-weight:600; padding:4px var(--s3); }
+  #commit:hover { background:hsl(207 100% 70%); border-color:hsl(207 100% 70%); color:hsl(228 40% 8%); }
+  #build-scrub { flex:0 1 120px; min-width:72px; }
+  @media (max-width:1100px) {
+    #delete, #tool-translate, #options-menu { margin-left:0; }
+    #toolbar { gap:3px; padding:4px; }
+    #toolbar .spacer { display:none; }
+  }
+  @media (max-width:620px) {
+    #toolbar .status { flex-basis:100%; min-width:0; }
+    #hud { max-width:100%; min-width:0; }
+    #hudtext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #options-popout { max-width:calc(100vw - 24px); max-height:calc(100vh - 72px); overflow:auto; }
+  }
+
+  #hud { display:flex; align-items:center; gap:var(--s1); color:var(--ink-3); }
+  .sync-time { color:var(--ink-4); font-size:10px; white-space:nowrap; }
+  .mode-switch { display:inline-flex; align-items:center; gap:var(--s1); padding:4px 10px; border:1px solid var(--select-edge); border-radius:var(--r-sm); background:var(--select-dim); color:var(--select); font-weight:600; text-decoration:none; white-space:nowrap; }
+  .mode-switch:hover { background:var(--select); color:hsl(228 40% 8%); }
+  #options-button { border-color:var(--select-edge); color:var(--select); background:var(--select-dim); font-weight:600; }
+  #options-button:hover { background:var(--select); color:hsl(228 40% 8%); }
+  #hud .dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:var(--s1); background:var(--ink-4); }
+  #hud .dot.live { background:var(--live); box-shadow:0 0 0 3px rgba(105, 199, 140, .16); }
+
+  .panel { position:fixed; color:var(--ink-2); background:var(--chrome); border:1px solid var(--seam); border-radius:var(--r-md); z-index:6; overflow:hidden; box-sizing:border-box; min-width:170px; min-height:80px; display:flex; flex-direction:column; }
+  /* titles are primary ink, NOT blue — blue belongs to selection alone */
+  .panel-title { color:var(--ink); padding:var(--s2) var(--s2) 6px; font-weight:600; font-size:11px; letter-spacing:.04em; text-transform:uppercase; border-bottom:1px solid var(--seam-soft); cursor:move; user-select:none; touch-action:none; flex:0 0 auto; }
+  .panel.dragging, .panel.resizing { user-select:none; }
+  .panel.dragging { opacity:.9; outline:1px solid var(--select); box-shadow:var(--float); z-index:20; }
+
+  .dock-slots { position:fixed; inset:0; display:none; pointer-events:none; z-index:15; }
+  .dock-slots.active { display:block; }
+  .dock-slot { position:absolute; box-sizing:border-box; border:1px dashed transparent; border-radius:var(--r-md); background:transparent; transition:.1s; }
+  .dock-slot::after { content:attr(data-label); position:absolute; inset:0; display:grid; place-items:center; color:var(--select); background:var(--select-dim); background-image:var(--studs); border-radius:var(--r-md); opacity:0; font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+  .dock-slot.active { border-color:var(--select-edge); }
+  .dock-slot.active::after { opacity:1; }
+  #dock-left { left:0; top:0; bottom:0; width:25%; }
+  #dock-right { right:0; top:0; bottom:0; width:25%; }
+  #dock-top { left:25%; right:25%; top:0; height:28%; }
+  #dock-bottom { left:25%; right:25%; bottom:0; height:28%; }
+
+  #explorer { top:52px; left:var(--s2); bottom:var(--s2); width:238px; }
+  #properties { top:52px; right:var(--s2); bottom:var(--s2); width:286px; }
+  #generations { top:52px; right:302px; width:380px; max-height:520px; padding:var(--s2); font-size:12px; }
+  #generations-title { color:var(--ink); margin-bottom:6px; font-weight:600; font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+  body.mirror-mode #properties, body.mirror-mode #generations, body.mirror-mode #history, body.mirror-mode #tool-translate, body.mirror-mode #tool-rotate, body.mirror-mode #tool-scale { display:none !important; }
+  #recent-save-form { display:flex; gap:var(--s1); margin-bottom:6px; }
+  #recent-save-form input { flex:1; width:0; }
+  #explorer-list, #property-content, #generations-list { flex:1 1 auto; min-height:0; min-width:0; overflow:auto; }
+  #recent-save-form, #recent-export { flex:0 0 auto; }
+
+  #history { top:52px; right:548px; width:230px; max-height:340px; padding:var(--s2); font-size:12px; }
+  #history-controls { display:flex; gap:var(--s1); margin-bottom:6px; }
+  #history-controls button { flex:1; }
+  #history-position { color:var(--ink-3); font-family:var(--mono); font-size:10px; margin-bottom:6px; }
+  #history-list { flex:1 1 auto; min-height:0; overflow:auto; }
+  .history-entry { display:block; width:100%; padding:6px; text-align:left; border:0; border-top:1px solid var(--seam-soft); border-radius:0; background:transparent; }
+  .history-entry:first-child { border-top:0; }
+  .history-entry.current { color:var(--ink); background:var(--select-dim); box-shadow:inset 2px 0 0 var(--select); }
+  .history-entry-label { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .history-entry-meta { display:block; color:var(--ink-4); font-family:var(--mono); font-size:10px; margin-top:2px; }
+
+  .recent-entry { border-top:1px solid var(--seam-soft); padding:6px 0; }
+  .recent-entry:first-child { border-top:0; }
+  .recent-entry-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink); }
+  .recent-entry-meta { color:var(--ink-4); font-size:11px; margin:2px 0 var(--s1); }
+  .recent-entry-actions { display:flex; gap:var(--s1); }
+  .recent-entry-actions button { flex:1; }
+  #recent-export { width:100%; margin-top:6px; }
+
+  .generation { margin:var(--s1) 0; }
+  .generation label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+  .generation label:hover { color:var(--ink); }
+  .generation input { margin:0; accent-color:var(--select); }
+  .generation-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .generation-status { color:var(--ink-4); padding-left:20px; font-size:11px; }
+  .generation-error { color:var(--danger); }
+  .library-toolbar { display:flex; gap:var(--s1); margin-bottom:6px; }
+  .library-toolbar button { flex:1; }
+  .library-tabs { display:flex; margin-bottom:6px; border-bottom:1px solid var(--seam-soft); }
+  .library-tabs button { flex:1; border:0; border-radius:0; background:transparent; border-bottom:2px solid transparent; }
+  .library-tabs button.active { color:var(--select); border-bottom-color:var(--select); }
+  .library-layout { display:flex; gap:var(--s2); flex:1 1 auto; min-height:0; }
+  .library-sidebar { flex:0 0 112px; min-width:0; border-right:1px solid var(--seam-soft); padding-right:var(--s2); overflow:auto; }
+  .library-main { display:flex; flex-direction:column; flex:1 1 auto; min-width:0; min-height:0; }
+  .library-category-list { display:grid; gap:2px; margin-bottom:6px; }
+  .library-category-row { display:flex; min-width:0; }
+  .library-category-row button:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:left; }
+  .library-category-row button:last-child { flex:0 0 auto; }
+  #library-category-add { display:flex; gap:2px; }
+  #library-category-add input { width:0; flex:1; }
+  .library-folder { color:var(--ink-4); font-size:10px; margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .library-section-title { color:var(--ink-3); font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; padding:5px 0; }
+  .library-card { border-top:1px solid var(--seam-soft); padding:6px 0; }
+  .library-card:first-child { border-top:0; }
+  .library-card-name { color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .library-card-meta { color:var(--ink-4); font-size:10px; margin:2px 0 5px; }
+  .library-card.stale { border-left:2px solid var(--warn); padding-left:5px; }
+  .library-generator-toggle { display:flex; gap:6px; align-items:center; margin:4px 0 5px; color:var(--ink-3); cursor:pointer; }
+  .library-generator-toggle input { margin:0; accent-color:var(--select); }
+  .library-generator-toggle:hover { color:var(--ink); }
+  .library-stale { color:var(--warn); font-size:10px; line-height:1.35; margin:3px 0 5px; }
+  .library-card-actions { display:flex; gap:var(--s1); }
+  .library-card-actions button { flex:1; }
+  .library-preview { display:block; box-sizing:border-box; width:100%; height:auto; aspect-ratio:16 / 9; margin:4px 0 5px; background:var(--canvas); border:1px solid var(--seam-soft); border-radius:var(--r-sm); }
+  .library-save { display:flex; flex-wrap:wrap; gap:var(--s1); margin-bottom:6px; }
+  .library-save input { flex:1; width:0; }
+  .library-save select { flex:1 1 100%; }
+
+  .tree { padding:var(--s1) var(--s1) 10px; }
+  .tree-row { display:flex; gap:6px; align-items:center; min-height:22px; padding:1px var(--s1); cursor:pointer; border-radius:var(--r-sm); border-left:2px solid transparent; }
+  .tree-row[draggable="true"] { cursor:grab; }
+  .tree-row.dragging { cursor:grabbing; opacity:.7; }
+  /* hover and selection must NOT look the same — they did before */
+  .tree-row:hover { background:var(--control-hi); }
+  .tree-row.drop-active { outline:1px solid var(--select); background:var(--select-dim); }
+  .tree-row.selected { background:var(--select-dim); border-left-color:var(--select); color:var(--ink); }
+  .tree-row.invalid { color:var(--warn); background:rgba(214, 157, 62, .08); cursor:default; }
+  .tree-row.invalid:hover { background:rgba(214, 157, 62, .13); }
+  .tree-row.invalid .kind, .tree-row.invalid .meta { color:var(--warn); }
+  .tree-row-action { flex:0 0 auto; margin-left:auto; padding:2px 5px; color:var(--warn); border-color:rgba(214, 157, 62, .35); }
+  .tree-row .kind { color:var(--ink-4); width:14px; text-align:center; flex:0 0 auto; }
+  /* only collapsible rows get an interactive caret; leaves keep a quiet marker */
+  .tree-row .kind.caret { cursor:pointer; color:var(--ink-3); }
+  .tree-row .kind.caret:hover { color:var(--select); }
+  #explorer-search-wrap { flex:0 0 auto; padding:6px var(--s2); border-bottom:1px solid var(--seam-soft); }
+  #explorer-search { width:100%; box-sizing:border-box; }
+  #explorer-search::-webkit-search-cancel-button { filter:grayscale(1) opacity(.6); cursor:pointer; }
+  .tree-hit { color:var(--select); }
+  .tree-row.selected .kind { color:var(--select); }
+  .tree-row .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tree-row .meta { color:var(--ink-4); margin-left:auto; font-size:10px; }
+
+  /* signature: an empty panel shows bare baseplate awaiting geometry. Must FILL
+     its container — a grid sized to the text box reads as a glitch, not texture. */
+  .empty { padding:var(--s3) var(--s2); color:var(--ink-4); box-sizing:border-box; min-height:100%;
+           background-image:repeating-linear-gradient(0deg, rgba(158,172,214,.045) 0 1px, transparent 1px 16px),
+                            repeating-linear-gradient(90deg, rgba(158,172,214,.045) 0 1px, transparent 1px 16px); }
+
+  #selection-marquee { position:fixed; display:none; pointer-events:none; z-index:2; border:1px solid var(--select); background:var(--select-dim); box-sizing:border-box; border-radius:2px; }
+
+  .prop-section { padding:var(--s2); border-bottom:1px solid var(--seam-soft); }
+  .prop-heading { color:var(--ink-3); margin-bottom:6px; font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+  .prop-grid { display:grid; grid-template-columns:50px 1fr 1fr 1fr; gap:var(--s1); align-items:center; }
+  .prop-grid label { color:var(--ink-3); }
+  .prop-grid input[type="color"] { padding:1px; width:100%; height:24px; background:var(--control); }
+  .prop-grid .wide { grid-column:2 / -1; }
+
+  .hint { color:var(--ink-4); line-height:1.45; }
+  .limit { color:var(--warn); }
+  #toolbar .mode { color:var(--warn); }
+
+  #options-menu { position:relative; }
+  #options-popout { position:absolute; right:0; top:calc(100% + var(--s1)); width:250px; padding:var(--s1); background:var(--chrome-hi); border:1px solid var(--seam); border-radius:var(--r-md); box-shadow:var(--float); z-index:30; }
+  #options-popout[hidden] { display:none; }
+  .options-section { padding:var(--s1); border-top:1px solid var(--seam-soft); }
+  .options-section:first-child { border-top:0; }
+  .options-heading { color:var(--ink); margin-bottom:6px; font-size:10px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; }
+  .options-row { display:flex; gap:var(--s2); align-items:center; justify-content:space-between; }
+  .options-row select { flex:1; }
+  #force-sync { width:100%; }
+  #panel-menu-list { display:grid; gap:2px; }
+  #panel-menu-list label { display:flex; gap:7px; align-items:center; padding:5px; white-space:nowrap; border-radius:var(--r-sm); cursor:pointer; }
+  #panel-menu-list label:hover { background:var(--control-hi); color:var(--ink); }
+  #panel-menu-list input { accent-color:var(--select); }
+  .options-check { display:flex; gap:7px; align-items:flex-start; cursor:pointer; }
+  .options-check input { margin:2px 0 0; accent-color:var(--select); }
+  .ground-target { color:var(--ink-3); font-size:11px; overflow-wrap:anywhere; margin-bottom:6px; }
+  .ground-actions { display:flex; gap:var(--s1); }
+  .ground-actions button { flex:1; }
+
+  .dock-stack { position:fixed; box-sizing:border-box; z-index:4; display:flex; flex-direction:column; gap:0; overflow:hidden; background:var(--chrome); border:1px solid var(--seam); border-radius:var(--r-md); }
+  .dock-stack[hidden] { display:none !important; }
+  .dock-tabs { display:flex; min-height:26px; overflow:auto; border-bottom:1px solid var(--seam-soft); }
+  .dock-tabs[hidden] { display:none !important; }
+  .dock-tab { border:0; border-radius:0; background:transparent; color:var(--ink-3); white-space:nowrap; font-size:11px; letter-spacing:.03em; border-bottom:2px solid transparent; }
+  .dock-tab:hover { background:var(--control-hi); color:var(--ink-2); }
+  .dock-tab.active { color:var(--ink); background:transparent; border-bottom-color:var(--select); }
+  .dock-stack .panel { position:relative; inset:auto!important; flex:1 1 auto; width:auto!important; height:auto!important; min-width:0; min-height:0; border:0; border-radius:0; display:none; }
+  .dock-stack .panel.active { display:flex; }
+
+  .panel-title { display:flex; align-items:center; gap:6px; }
+  .panel-title-text { flex:1; }
+  .panel-close { flex:0 0 auto; margin-left:auto; padding:0 var(--s1); border:0; background:transparent; color:var(--ink-4); }
+  .panel-close:hover { color:var(--ink); background:transparent; }
+
+  .panel-resize { position:absolute; z-index:2; width:12px; height:12px; touch-action:none; }
+  .panel-resize[data-edge="e"] { right:0; top:0; bottom:0; width:8px; height:auto; cursor:ew-resize; }
+  .panel-resize[data-edge="w"] { left:0; top:0; bottom:0; width:8px; height:auto; cursor:ew-resize; }
+  .panel-resize[data-edge="n"] { top:0; left:0; right:0; width:auto; height:8px; cursor:ns-resize; }
+  .panel-resize[data-edge="s"] { bottom:0; left:0; right:0; width:auto; height:8px; cursor:ns-resize; }
+  .panel-resize[data-edge="se"] { right:-14px; bottom:-14px; width:28px; height:28px; cursor:nwse-resize; }
+  .panel-resize::after { content:""; position:absolute; inset:0; border:0; background:transparent; opacity:0; transition:background .08s, box-shadow .08s; }
+  .panel-resize[data-edge="se"]::after { inset:3px; border-right:2px solid var(--ink-4); border-bottom:2px solid var(--ink-4); opacity:.9; }
+  .dock-stack .panel-resize[data-edge="e"], .dock-stack .panel-resize[data-edge="w"] { top:0; bottom:0; height:auto; transform:none; }
+  .dock-stack .panel-resize[data-edge="n"], .dock-stack .panel-resize[data-edge="s"] { left:0; right:0; width:auto; transform:none; }
+  .panel-resize:hover, .panel-resize[data-resizing="true"] { background:var(--select-dim); }
+  .panel-resize:hover::after, .panel-resize[data-resizing="true"]::after { background:var(--select); opacity:1; }
+  .panel[data-resizing-edge="e"] { box-shadow:inset -2px 0 0 var(--select); }
+  .panel[data-resizing-edge="w"] { box-shadow:inset 2px 0 0 var(--select); }
+  .panel[data-resizing-edge="n"] { box-shadow:inset 0 2px 0 var(--select); }
+  .panel[data-resizing-edge="s"] { box-shadow:inset 0 -2px 0 var(--select); }
+  .panel[data-resizing-edge="se"] { box-shadow:inset -2px 0 0 var(--select), inset 0 -2px 0 var(--select); }
+  .dock-stack .panel-resize[data-edge="se"] { display:none; }
+  .dock-stack .panel-resize[data-edge="e"], .dock-stack .panel-resize[data-edge="w"], .dock-stack .panel-resize[data-edge="n"], .dock-stack .panel-resize[data-edge="s"] { display:block; }
+  .dock-stack[data-slot="left"] .panel-resize[data-edge="n"], .dock-stack[data-slot="left"] .panel-resize[data-edge="s"], .dock-stack[data-slot="left"] .panel-resize[data-edge="w"], .dock-stack[data-slot="right"] .panel-resize[data-edge="n"], .dock-stack[data-slot="right"] .panel-resize[data-edge="s"], .dock-stack[data-slot="right"] .panel-resize[data-edge="e"], .dock-stack[data-slot="top"] .panel-resize[data-edge="e"], .dock-stack[data-slot="top"] .panel-resize[data-edge="w"], .dock-stack[data-slot="top"] .panel-resize[data-edge="n"], .dock-stack[data-slot="bottom"] .panel-resize[data-edge="e"], .dock-stack[data-slot="bottom"] .panel-resize[data-edge="w"], .dock-stack[data-slot="bottom"] .panel-resize[data-edge="s"] { display:none; }
+  .dock-slot { z-index:1; }
+
+  ::-webkit-scrollbar { width:9px; height:9px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--seam); border-radius:5px; border:2px solid transparent; background-clip:content-box; }
+  ::-webkit-scrollbar-thumb:hover { background:var(--seam-strong); background-clip:content-box; }
+</style>
+</head>
+<body>
+<div id="toolbar" aria-label="Stage editor toolbar">
+  <div id="hud"><span id="dot" class="dot"></span><span id="hudtext">connecting...</span><span id="sync-time" class="sync-time">Last sync: never</span></div>
+  <a id="mode-switch" class="mode-switch" href="./stage.html?mirror=1">Open mirror</a>
+  <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+  <button id="redo" title="Redo (Ctrl+Y / Ctrl+Shift+Z)">Redo</button>
+  <button id="delete" title="Delete selection">Delete</button>
+  <button id="lock" disabled title="Lock or unlock selection (L)">Lock</button>
+  <button id="detach" title="Take over the generator file that builds the selection, so it can be edited here">Detach</button>
+  <button id="mirror-copy" hidden title="Copy the selected instances into the Stage editor for manual edits">Copy to stage</button>
+  <button id="group" title="Group the selected parts into one prop">Group</button>
+  <button id="ungroup" title="Make the selected prop parts standalone">Ungroup</button>
+  <button id="frame" title="Frame selection">Frame</button>
+  <button id="tool-translate" title="Translate">Move</button>
+  <button id="tool-rotate" title="Rotate">Rotate</button>
+  <button id="tool-scale" title="Scale">Scale</button>
+  <button id="build-play" title="Replay the build in construction order">▶ Build</button>
+  <input id="build-scrub" type="range" min="0" max="0" value="0" step="1" title="Scrub the build" style="width:120px" />
+  <label id="build-auto-wrap" title="Replay automatically whenever the stage changes"><input id="build-auto" type="checkbox" /> auto</label>
+  <div id="options-menu">
+    <button id="options-button" type="button" aria-expanded="false">Options</button>
+    <div id="options-popout" hidden role="dialog" aria-label="Options">
+      <section id="options-csg" class="options-section">
+        <div class="options-heading">Renderer</div>
+        <label class="options-row" for="csg-mode-select"><span>CSG mode</span><select id="csg-mode-select"><option value="edit">Edit operands</option><option value="preview">Preview solids</option></select></label>
+        <label class="options-row" for="csg-max"><span>CSG max parts</span><input id="csg-max" type="number" min="1" step="1" value="100" style="width:76px" /></label>
+        <div id="csg-limit" class="mode"></div>
+      </section>
+      <section class="options-section">
+        <div class="options-heading">Selection</div>
+        <label class="options-check" for="smart-select">
+          <input id="smart-select" type="checkbox" aria-label="Smart select: include missed parts when 90% of an unlocked group is marquee-selected" aria-describedby="smart-select-help" />
+          <span>Smart select</span>
+        </label>
+        <div id="smart-select-help" class="hint">Marquee-select at least 90% of an unlocked group to include its other selectable parts.</div>
+      </section>
+      <section id="options-ground" class="options-section" hidden>
+        <div class="options-heading">Map ground</div>
+        <div id="ground-target" class="ground-target">No ground part set</div>
+        <div class="ground-actions">
+          <button id="ground-set" type="button" title="Use the selected mirror instance as the map ground">Use selected</button>
+          <button id="ground-clear" type="button" title="Remove the map ground restriction">Clear</button>
+        </div>
+      </section>
+      <section class="options-section">
+        <div class="options-heading">Sync</div>
+        <button id="force-sync" type="button">Force sync</button>
+        <div id="options-sync-time" class="sync-time">Last sync: never</div>
+      </section>
+      <section class="options-section">
+        <div class="options-heading">Panels</div>
+        <div id="panel-menu-list"></div>
+      </section>
+    </div>
+  </div>
+  <span class="spacer"></span>
+  <button id="commit" title="Commit staged ops to Roblox">Port to Roblox</button>
+  <span id="status" class="status">WASD/Q/E - click a part to select</span>
+</div>
+<div id="dock-slots" class="dock-slots" aria-hidden="true">
+  <div id="dock-left" class="dock-slot" data-slot="left" data-label="Dock left"></div>
+  <div id="dock-right" class="dock-slot" data-slot="right" data-label="Dock right"></div>
+  <div id="dock-top" class="dock-slot" data-slot="top" data-label="Dock top"></div>
+  <div id="dock-bottom" class="dock-slot" data-slot="bottom" data-label="Dock bottom"></div>
+</div>
+<aside id="explorer" class="panel" aria-label="Explorer">
+  <div class="panel-title">Explorer</div>
+  <div id="explorer-search-wrap">
+    <input id="explorer-search" type="search" placeholder="Search name or class..." autocomplete="off" spellcheck="false" aria-label="Filter explorer" />
+  </div>
+  <div id="explorer-list" class="tree"><div class="empty">Waiting for stage sync...</div></div>
+</aside>
+<aside id="properties" class="panel" aria-label="Properties">
+  <div class="panel-title">Properties</div>
+  <div id="property-content"><div class="empty">Select an op or part.</div></div>
+</aside>
+<aside id="generations" aria-label="Library">
+  <div id="generations-title">Library</div>
+  <div id="library-tabs" class="library-tabs" role="tablist" aria-label="Library sections">
+    <button type="button" role="tab" data-library-tab="user">My Library</button>
+    <button type="button" role="tab" data-library-tab="ai">AI Library</button>
+    <button type="button" role="tab" data-library-tab="recent">Recent</button>
+  </div>
+  <div class="library-layout">
+    <div class="library-sidebar" aria-label="Library categories">
+      <div id="library-category-list" class="library-category-list"></div>
+      <form id="library-category-add" aria-label="Add library category">
+        <input id="library-category-name" type="text" maxlength="80" placeholder="new category" autocomplete="off" />
+        <button type="submit" title="Add category">+</button>
+      </form>
+    </div>
+    <div class="library-main">
+      <div id="library-user-actions">
+        <div class="library-toolbar">
+          <button id="library-import" type="button">Import preset</button>
+          <input id="library-file" type="file" accept=".bkasset.json,.json,application/json" hidden />
+        </div>
+        <form id="library-save-form" class="library-save" aria-label="Save selection to library">
+          <input id="library-name" type="text" maxlength="80" placeholder="preset name" title="Name the selected stage object(s)" autocomplete="off" />
+          <button type="submit" title="Save the selected stage object(s) to the library">Save</button>
+          <select id="library-save-category" aria-label="Save category"><option value="">Uncategorized</option></select>
+        </form>
+      </div>
+      <div id="library-recent-actions" hidden>
+        <form id="recent-save-form">
+          <input id="recent-name" type="text" maxlength="80" placeholder="stage name" autocomplete="off" />
+          <button id="recent-save" type="submit">Save current stage</button>
+        </form>
+        <button id="recent-export" type="button">Export .bkstage</button>
+      </div>
+      <div id="library-folder" class="library-folder" title="Library folder"></div>
+      <div id="generations-list">loading...</div>
+    </div>
+  </div>
+</aside>
+<aside id="history" class="panel" aria-label="History">
+  <div class="panel-title">History</div>
+  <div id="history-controls">
+    <button id="history-undo" type="button" disabled title="Undo the current stage edit">Undo</button>
+    <button id="history-redo" type="button" disabled title="Redo the current stage edit">Redo</button>
+  </div>
+  <div id="history-position">History unavailable</div>
+  <div id="history-list"><div class="empty">loading...</div></div>
+</aside>
+<div id="selection-marquee" aria-hidden="true"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+  "three-bvh-csg": "https://unpkg.com/three-bvh-csg@0.0.17/build/index.module.js",
+  "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.9.1/build/index.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from "three-bvh-csg";
+import { addMirrorParts, addPart, addPlaceholder, initScene, meshForPart, selectionTargetForHit } from "./shared.js";
+import { previewCameraFit, previewPlacementDelta } from "./library-preview.js";
+import { deletePatchesForSelection } from "./stage-delete.js";
+import { lockPatchesForSelection } from "./stage-lock.js";
+
+const searchParams = new URLSearchParams(location.search);
+const mirrorMode = searchParams.get("mirror") === "1";
+const stageSession = searchParams.get("session") || "default";
+function stageRequestUrl(path) {
+  const url = new URL(path, location.href);
+  url.searchParams.set("session", stageSession);
+  return `${url.pathname}${url.search}`;
+}
+if (mirrorMode) {
+  document.title = "buildkit scene mirror";
+  document.body.classList.add("mirror-mode");
+  for (const id of ["undo", "redo", "delete", "lock", "detach", "group", "ungroup", "commit"]) {
+    document.getElementById(id)?.setAttribute("hidden", "");
+  }
+  for (const id of ["properties", "generations", "history", "tool-translate", "tool-rotate", "tool-scale"]) {
+    document.getElementById(id)?.setAttribute("hidden", "");
+  }
+  document.getElementById("options-csg")?.setAttribute("hidden", "");
+  document.getElementById("options-ground")?.removeAttribute("hidden");
+  document.getElementById("mirror-copy")?.removeAttribute("hidden");
+  const mirrorLink = document.getElementById("mode-switch");
+  if (mirrorLink) {
+    mirrorLink.href = `./stage.html?session=${encodeURIComponent(stageSession)}`;
+    mirrorLink.textContent = "Stage editor";
+  }
+} else {
+  document.getElementById("mode-switch").href = `./stage.html?mirror=1&session=${encodeURIComponent(stageSession)}`;
+}
+
+const hudtext = document.getElementById("hudtext");
+const dot = document.getElementById("dot");
+const status = document.getElementById("status");
+const forceSyncButton = document.getElementById("force-sync");
+const groupButton = document.getElementById("group");
+const ungroupButton = document.getElementById("ungroup");
+const lockButton = document.getElementById("lock");
+const generationsList = document.getElementById("generations-list");
+const libraryImportButton = document.getElementById("library-import");
+const libraryFileInput = document.getElementById("library-file");
+const librarySaveForm = document.getElementById("library-save-form");
+const libraryNameInput = document.getElementById("library-name");
+const librarySaveCategory = document.getElementById("library-save-category");
+const libraryCategoryList = document.getElementById("library-category-list");
+const libraryCategoryAdd = document.getElementById("library-category-add");
+const libraryCategoryName = document.getElementById("library-category-name");
+const libraryUserActions = document.getElementById("library-user-actions");
+const libraryRecentActions = document.getElementById("library-recent-actions");
+const libraryFolder = document.getElementById("library-folder");
+const recentSaveForm = document.getElementById("recent-save-form");
+const recentName = document.getElementById("recent-name");
+const recentSaveButton = document.getElementById("recent-save");
+const recentExportButton = document.getElementById("recent-export");
+const historyList = document.getElementById("history-list");
+const historyPosition = document.getElementById("history-position");
+const historyUndoButton = document.getElementById("history-undo");
+const historyRedoButton = document.getElementById("history-redo");
+const explorerList = document.getElementById("explorer-list");
+const explorerSearch = document.getElementById("explorer-search");
+const propertyContent = document.getElementById("property-content");
+const csgModeSelect = document.getElementById("csg-mode-select");
+const csgLimit = document.getElementById("csg-limit");
+const csgMaxInput = document.getElementById("csg-max");
+const smartSelectInput = document.getElementById("smart-select");
+const groundTargetLabel = document.getElementById("ground-target");
+const groundSetButton = document.getElementById("ground-set");
+const groundClearButton = document.getElementById("ground-clear");
+// Stage-wide CSG budget. Any op that sets its own csgMax wins over this. Persisted
+// locally so it survives a reload, and pushed to the server which injects it at commit.
+let stageCsgMax = 100;
+try {
+  const saved = Number(localStorage.getItem("buildkit-csg-max"));
+  if (Number.isFinite(saved) && saved >= 1) stageCsgMax = Math.floor(saved);
+} catch {}
+if (csgMaxInput) csgMaxInput.value = String(stageCsgMax);
+function pushCsgMax(value) {
+  const next = Math.max(1, Math.floor(Number(value) || 0));
+  if (!Number.isFinite(next) || next < 1) return;
+  stageCsgMax = next;
+  try { localStorage.setItem("buildkit-csg-max", String(next)); } catch {}
+  updateCsgLabel();
+  postStage("/stage/options", { csgMax: next }, "CSG options").catch(() => {});
+}
+csgMaxInput?.addEventListener("change", () => pushCsgMax(csgMaxInput.value));
+const selectionMarquee = document.getElementById("selection-marquee");
+const transformButtons = {
+  translate: document.getElementById("tool-translate"),
+  rotate: document.getElementById("tool-rotate"),
+  scale: document.getElementById("tool-scale"),
+};
+const { scene, camera, renderer, controls } = await initScene();
+renderer.domElement.id = "stage-viewport";
+renderer.domElement.tabIndex = 0;
+
+let group = new THREE.Group();
+scene.add(group);
+const selectionTransformProxy = new THREE.Object3D();
+selectionTransformProxy.name = "selection-transform-proxy";
+selectionTransformProxy.visible = false;
+scene.add(selectionTransformProxy);
+function captureCameraView() {
+  return { position: camera.position.clone(), target: controls.target.clone(), zoom: camera.zoom };
+}
+
+function rendererCenterOnGround() {
+  const direction = new THREE.Vector3(0, 0, 0).unproject(camera).sub(camera.position).normalize();
+  const hit = new THREE.Ray(camera.position, direction).intersectPlane(
+    new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+    new THREE.Vector3(),
+  );
+  return hit && Number.isFinite(hit.x) && Number.isFinite(hit.z)
+    ? hit
+    : new THREE.Vector3(controls.target.x, 0, controls.target.z);
+}
+
+function restoreCameraView(view) {
+  if (!view) return;
+  camera.position.copy(view.position);
+  controls.target.copy(view.target);
+  camera.zoom = view.zoom;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+let opCount = 0;
+let stageOps = [];
+let stageDump = null;
+// Mirror: the explorer node last clicked (part OR group) — drives "Copy to stage".
+let mirrorNode = null;
+let mirrorTreePartIndices = new WeakMap();
+// Stage: latest generator list, so the stage explorer can group ops by the file that
+// produced them rather than showing a flat op list.
+let stageGenerations = [];
+let csgMode = "edit";
+try { if (localStorage.getItem("buildkit-csg-mode") === "preview") csgMode = "preview"; } catch {}
+const SMART_SELECT_STORAGE_KEY = "buildkit-smart-select";
+const SMART_SELECT_THRESHOLD = 0.9;
+let smartSelectEnabled = false;
+try { smartSelectEnabled = localStorage.getItem(SMART_SELECT_STORAGE_KEY) === "true"; } catch {}
+let selected = null;
+let selectedObjects = [];
+let selectionHelpers = [];
+let transform = null;
+let dragSnapshot = null;
+let dragObjectSnapshots = [];
+let dragPivot = null;
+let draggingTransform = false;
+let suppressClick = false;
+let marqueeDrag = null;
+let lastStageRevision = -1;
+let stageClientTransformRevision = 0;
+let stageClientOverlay = null;
+let lastMirrorRevision = -1;
+const keys = new Set();
+
+function updateTransformToolbar(mode) {
+  for (const [buttonMode, button] of Object.entries(transformButtons)) {
+    const active = buttonMode === mode;
+    button?.classList.toggle("active", active);
+    button?.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function setTransformMode(mode, requireSelection = false) {
+  if (!transform || (requireSelection && !selected?.object)) return false;
+  transform.setMode(mode);
+  updateTransformToolbar(mode);
+  return true;
+}
+
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const vec3 = (value, fallback = [0, 0, 0]) => Array.isArray(value) && value.length === 3 && value.every((n) => Number.isFinite(Number(n))) ? value.map(Number) : [...fallback];
+function friendlyLabel(value, fallback = "Untitled") {
+  const raw = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  const base = raw.split(/[\\/]/).pop()?.replace(/\.(?:m?js|cjs|jsx|ts|tsx|lua|luau)$/i, "") || "";
+  const readable = base.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return readable ? readable.replace(/\b\w/g, (char) => char.toUpperCase()) : fallback;
+}
+const typing = () => {
+  const active = document.activeElement;
+  return active && (active.tagName === "INPUT" || active.tagName === "SELECT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+};
+
+const layoutKey = "buildkit-layout";
+const legacyLayoutKey = "buildkit-stage-layout";
+const layoutPanelIds = mirrorMode ? ["explorer"] : ["explorer", "properties", "generations", "history"];
+const layoutPanels = layoutPanelIds.map((id) => document.getElementById(id));
+const dockSlots = [...document.querySelectorAll(".dock-slot")];
+const dockSlotNames = new Set(dockSlots.map((slot) => slot.dataset.slot));
+const dockContainer = document.getElementById("dock-slots");
+const docked = new Map();
+const layoutSnap = 12;
+const layoutMin = { width: 170, height: 80 };
+
+function panelRect(panel) {
+  const rect = panel.getBoundingClientRect();
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+}
+
+function layoutDockSlots() {
+  const rects = dockTargetRects();
+  for (const slot of dockSlots) {
+    const rect = rects[slot.dataset.slot];
+    if (!rect) continue;
+    Object.assign(slot.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+  }
+}
+
+function updateDockTargets(x, y) {
+  layoutDockSlots();
+  const rects = dockTargetRects();
+  let hit = null;
+  for (const slot of dockSlots) {
+    const rect = rects[slot.dataset.slot];
+    if (!rect) continue;
+    const active = x >= rect.left && x <= rect.left + rect.width && y >= rect.top && y <= rect.top + rect.height;
+    slot.classList.toggle("active", active);
+    if (active) hit = slot.dataset.slot;
+  }
+  return hit;
+}
+
+function clearDockTargets() { dockSlots.forEach((slot) => slot.classList.remove("active")); }
+
+// Real dock layout: one stack per slot; a stack's tab strip prevents overlap.
+const dockStacks = new Map();
+const dockActive = {};
+const dockDims = { left:238, right:286, top:180, bottom:180 };
+function dockIsOpen(slot) { return layoutPanels.some((panel) => docked.get(panel.id) === slot && panel.dataset.open !== "false"); }
+function dockTargetRects() {
+  const top = Math.ceil(document.getElementById("toolbar").getBoundingClientRect().bottom + 4), bottom = innerHeight - 8, dropping = dockContainer.classList.contains("active"), gap = dropping ? 4 : 0;
+  const maxSide = Math.floor((innerWidth - gap * 2) / 2);
+  const left = dockIsOpen("left") || dropping ? Math.min(Math.max(layoutMin.width, dockDims.left), maxSide) : 0;
+  const right = dockIsOpen("right") || dropping ? Math.min(Math.max(layoutMin.width, dockDims.right), maxSide) : 0;
+  const x = left ? left + gap : 0, rightEdge = right ? innerWidth - right - gap : innerWidth, width = Math.max(1, rightEdge - x), height = bottom - top;
+  const topHeight = Math.min(Math.max(96, dockDims.top), Math.floor((height - 16) / 2));
+  const bottomHeight = Math.min(Math.max(96, dockDims.bottom), Math.floor((height - 16) / 2));
+  return {
+    left:{left:0,top,width:left,height},
+    right:{left:innerWidth-right,top,width:right,height},
+    top:{left:x,top,width,height:topHeight},
+    bottom:{left:x,top:bottom-bottomHeight,width,height:bottomHeight},
+  };
+}
+function panelStyle(panel, rect) {
+  const maxWidth=Math.max(1,innerWidth-16), maxHeight=Math.max(1,innerHeight-16);
+  const minWidth=Math.min(layoutMin.width,maxWidth), minHeight=Math.min(layoutMin.height,maxHeight);
+  const width=Math.max(minWidth,Math.min(number(rect.width,238),maxWidth)), height=Math.max(minHeight,Math.min(number(rect.height,180),maxHeight));
+  const left=Math.max(8,Math.min(number(rect.left,8),Math.max(8,innerWidth-width-8))), top=Math.max(8,Math.min(number(rect.top,48),Math.max(8,innerHeight-height-8)));
+  Object.assign(panel.style,{left:`${left}px`,top:`${top}px`,width:`${width}px`,height:`${height}px`,right:"auto",bottom:"auto",maxHeight:"none"});
+}
+function saveLayout() {
+  try {
+    let previous = null;
+    if (mirrorMode) {
+      try { previous = JSON.parse(localStorage.getItem(layoutKey) || "null"); } catch {}
+    }
+    const previousPanels = previous?.panels && typeof previous.panels === "object" ? previous.panels : {};
+    const panels = Object.fromEntries(layoutPanels.map((panel) => {
+      const slot = docked.get(panel.id);
+      const visibleRect = slot ? panelRect(stack(slot).root) : panelRect(panel);
+      let remembered = null;
+      try { remembered = JSON.parse(panel.dataset.lastLayoutRect || "null"); } catch {}
+      const rect = visibleRect.width > 0 && visibleRect.height > 0 ? visibleRect : (remembered || { left: 8, top: 48, width: 238, height: 180 });
+      if (visibleRect.width > 0 && visibleRect.height > 0) panel.dataset.lastLayoutRect = JSON.stringify(rect);
+      return [panel.id, { ...rect, dock: slot || null, open: panel.dataset.open !== "false" }];
+    }));
+    if (mirrorMode) Object.assign(previousPanels, panels);
+    const active = mirrorMode ? { ...(previous?.active || {}), ...dockActive } : dockActive;
+    const dims = mirrorMode ? { ...(previous?.dims || {}), left: dockDims.left } : dockDims;
+    localStorage.setItem(layoutKey, JSON.stringify({ panels: mirrorMode ? previousPanels : panels, active, dims }));
+  } catch {}
+}
+function loadLayout() {
+  let saved;
+  try {
+    const raw = localStorage.getItem(layoutKey) || localStorage.getItem(legacyLayoutKey) || "null";
+    saved = JSON.parse(raw);
+  } catch { saved=null; }
+  for (const panel of layoutPanels) {
+    document.body.append(panel);
+    docked.delete(panel.id);
+    panel.removeAttribute("data-dock-slot");
+  }
+  for (const key of Object.keys(dockActive)) delete dockActive[key];
+  const panels=saved?.panels||saved||{}; Object.assign(dockActive,saved?.active||saved?.activeTabs||{}); Object.assign(dockDims,saved?.dims||saved?.dockSizes||{});
+  for(const panel of layoutPanels) { const state=panels[panel.id]; panel.dataset.open=state?.open===false?"false":"true"; if(state?.dock&&dockSlotNames.has(state.dock)){docked.set(panel.id,state.dock);panel.dataset.dockSlot=state.dock;} panelStyle(panel,state||panelRect(panel)); }
+  if (!saved) {
+    docked.set("explorer", "left");
+    docked.set("properties", "right");
+    document.getElementById("explorer").dataset.dockSlot = "left";
+    document.getElementById("properties").dataset.dockSlot = "right";
+  }
+}
+function stack(slot) {
+  if(dockStacks.has(slot)) return dockStacks.get(slot);
+  const root=document.createElement("section"), tabs=document.createElement("div"); root.className="dock-stack"; root.dataset.slot=slot; tabs.className="dock-tabs"; root.append(tabs); document.body.append(root);
+  const value={root,tabs}; dockStacks.set(slot,value); return value;
+}
+function renderStack(slot) {
+  const value=stack(slot), panels=layoutPanels.filter(p=>docked.get(p.id)===slot&&p.dataset.open!=="false"); value.tabs.replaceChildren();
+  value.root.hidden=!panels.length; value.tabs.hidden=panels.length<2; value.tabs.setAttribute("aria-hidden",String(panels.length<2)); if(!panels.length)return;
+  const active=panels.find(p=>p.id===dockActive[slot])||panels[0]; dockActive[slot]=active.id;
+  panels.forEach(panel=>{panel.classList.toggle("active",panel===active);panel.style.display=panel===active?"flex":"none";const tab=document.createElement("button");tab.type="button";tab.className=`dock-tab${panel===active?" active":""}`;tab.textContent=panel.getAttribute("aria-label")||panel.id;tab.onclick=()=>{dockActive[slot]=panel.id;renderStack(slot);saveLayout();};value.tabs.append(tab);});
+}
+function applyDock(panel, slot) {
+  if(!slot){ const old=docked.get(panel.id); document.body.append(panel); docked.delete(panel.id); panel.removeAttribute("data-dock-slot"); panel.style.display=panel.dataset.open==="false"?"none":"flex"; if(old)renderStack(old); updateViewportLayout(); return; }
+  const value=stack(slot); value.root.append(panel); docked.set(panel.id,slot); panel.dataset.dockSlot=slot; panel.dataset.open="true"; dockActive[slot]=panel.id; renderStack(slot); updateViewportLayout();
+}
+function mountDockedPanels() {
+  for(const panel of layoutPanels)if(docked.has(panel.id))stack(docked.get(panel.id)).root.append(panel);
+  for(const slot of dockStacks.keys())renderStack(slot);
+  updatePanelMenu();
+  updateViewportLayout();
+}
+function updateViewportLayout() {
+  layoutDockSlots();
+  const rects = dockTargetRects();
+  for (const [slot, value] of dockStacks) {
+    const rect = rects[slot];
+    Object.assign(value.root.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    renderStack(slot);
+  }
+  const toolbar = document.getElementById("toolbar").getBoundingClientRect();
+  let left = 0, right = 0, top = toolbar.bottom + 4, bottom = 0;
+  for (const [slot, value] of dockStacks) if (!value.root.hidden) {
+    const rect = value.root.getBoundingClientRect();
+    if (slot === "left") left = Math.max(left, rect.right);
+    if (slot === "right") right = Math.max(right, innerWidth - rect.left);
+    if (slot === "top") top = Math.max(top, rect.bottom);
+    if (slot === "bottom") bottom = Math.max(bottom, innerHeight - rect.top);
+  }
+  const canvas = { left, right: innerWidth - right, top, bottom: innerHeight - bottom };
+  const canvasLeft = Math.max(0, canvas.left);
+  const canvasRight = Math.max(0, innerWidth - canvas.right);
+  const canvasTop = Math.max(0, canvas.top);
+  const canvasBottom = Math.max(0, innerHeight - canvas.bottom);
+  const width = Math.max(1, innerWidth - canvasLeft - canvasRight);
+  const height = Math.max(1, innerHeight - canvasTop - canvasBottom);
+  document.documentElement.style.setProperty("--canvas-left", `${canvasLeft}px`);
+  document.documentElement.style.setProperty("--canvas-right", `${canvasRight}px`);
+  document.documentElement.style.setProperty("--canvas-top", `${canvasTop}px`);
+  document.documentElement.style.setProperty("--canvas-bottom", `${canvasBottom}px`);
+  renderer.domElement.style.width = `${width}px`;
+  renderer.domElement.style.height = `${height}px`;
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  renderer.setSize(width, height, false);
+}
+function setupPanelLayout() {
+  document.getElementById("generations").classList.add("panel");
+  loadLayout(); const menu=document.getElementById("panel-menu-list");
+  for(const panel of layoutPanels){const title=panel.querySelector(".panel-title,[id$='-title']");title?.classList.add("panel-title");const close=document.createElement("button");close.type="button";close.className="panel-close";close.textContent="×";close.title="Close panel";close.setAttribute("aria-label",`Close ${panel.getAttribute("aria-label")||panel.id}`);title?.append(close);close.onpointerdown=e=>e.stopPropagation();close.onclick=()=>{const rect=panelRect(panel);if(rect.width>0&&rect.height>0)panel.dataset.lastLayoutRect=JSON.stringify(rect);panel.dataset.open="false";panel.style.display="none";if(docked.has(panel.id))renderStack(docked.get(panel.id));updatePanelMenu();updateViewportLayout();saveLayout();};
+    for(const edge of ["n","e","s","w","se"]){const handle=document.createElement("span");handle.className="panel-resize";handle.dataset.edge=edge;panel.append(handle);handle.onpointerdown=e=>resizeStart(e,panel,edge);} title?.addEventListener("pointerdown",e=>dragStart(e,panel));
+    const item=document.createElement("label"), input=document.createElement("input");input.type="checkbox";input.checked=panel.dataset.open!=="false";item.append(input,` ${panel.getAttribute("aria-label")||panel.id}`);input.onchange=()=>{panel.dataset.open=input.checked?"true":"false";panel.style.display=input.checked?"flex":"none";if(docked.has(panel.id))renderStack(docked.get(panel.id));updateViewportLayout();saveLayout();};menu.append(item);
+  }
+  mountDockedPanels();
+}
+function updatePanelMenu(){document.querySelectorAll("#panel-menu-list input").forEach(input=>{const label=input.parentElement;const name=label.textContent.trim();const panel=layoutPanels.find(p=>(p.getAttribute("aria-label")||p.id)===name);if(panel)input.checked=panel.dataset.open!=="false";});}
+function dragStart(event,panel){
+  if(event.button!==0||event.target.closest("button"))return;
+  event.preventDefault();event.stopPropagation();
+  const dragTarget=event.currentTarget, start=panelRect(panel), sx=event.clientX, sy=event.clientY;
+  applyDock(panel,null);panelStyle(panel,start);dockContainer.classList.add("active");dockContainer.setAttribute("aria-hidden","false");
+  try{dragTarget?.setPointerCapture?.(event.pointerId);}catch{}
+  const move=e=>{const width=panel.offsetWidth,height=panel.offsetHeight;panelStyle(panel,{left:Math.max(8,Math.min(start.left+e.clientX-sx,innerWidth-width-8)),top:Math.max(8,Math.min(start.top+e.clientY-sy,innerHeight-height-8)),width,height});updateDockTargets(e.clientX,e.clientY);updateViewportLayout();};
+  let ended=false;
+  const end=(e,cancelled=false)=>{if(ended)return;ended=true;const target=!cancelled&&e?updateDockTargets(e.clientX,e.clientY):null;if(target)applyDock(panel,target);clearDockTargets();dockContainer.classList.remove("active");dockContainer.setAttribute("aria-hidden","true");document.removeEventListener("pointermove",move);document.removeEventListener("pointerup",end);document.removeEventListener("pointercancel",cancel);try{dragTarget?.releasePointerCapture?.(event.pointerId);}catch{};saveLayout();updateViewportLayout();};
+  const cancel=()=>end(null,true);
+  document.addEventListener("pointermove",move);document.addEventListener("pointerup",end);document.addEventListener("pointercancel",cancel);
+}
+function resizeStart(event,panel,edge){
+  if(event.button!==0)return;
+  event.preventDefault();event.stopPropagation();
+  const dragTarget=event.currentTarget, slot=docked.get(panel.id), target=slot?stack(slot).root:panel, start=panelRect(target), sx=event.clientX, sy=event.clientY;
+  dragTarget.dataset.resizing="true";
+  panel.dataset.resizingEdge=edge;
+  try{dragTarget?.setPointerCapture?.(event.pointerId);}catch{}
+  const move=e=>{let {left,top,width,height}=start,dx=e.clientX-sx,dy=e.clientY-sy;const maxWidth=Math.max(1,innerWidth-16),maxHeight=Math.max(1,innerHeight-16),minWidth=Math.min(layoutMin.width,maxWidth),minHeight=Math.min(layoutMin.height,maxHeight);if(edge==="e"||edge==="w"||edge==="se")width=Math.min(maxWidth,Math.max(minWidth,start.width+(edge==="w"?-dx:dx)));if(edge==="n"||edge==="s"||edge==="se")height=Math.min(maxHeight,Math.max(minHeight,start.height+(edge==="n"?-dy:dy)));if(edge==="w")left=start.left+start.width-width;if(edge==="n")top=start.top+start.height-height;if(slot){if(slot==="left"||slot==="right")dockDims[slot]=width;else if(slot==="top"||slot==="bottom")dockDims[slot]=height;}else panelStyle(panel,{left,top,width,height});updateViewportLayout();};
+  const end=()=>{dragTarget.removeAttribute("data-resizing");delete panel.dataset.resizingEdge;document.removeEventListener("pointermove",move);document.removeEventListener("pointerup",end);document.removeEventListener("pointercancel",end);try{dragTarget?.releasePointerCapture?.(event.pointerId);}catch{};saveLayout();};
+  document.addEventListener("pointermove",move);document.addEventListener("pointerup",end);document.addEventListener("pointercancel",end);
+}
+setupPanelLayout();
+document.querySelectorAll(".panel-close").forEach((button) => { button.textContent = "\u00d7"; });
+if (smartSelectInput) {
+  smartSelectInput.checked = smartSelectEnabled;
+  smartSelectInput.title = "Smart select: include missed parts when 90% of an unlocked group is marquee-selected";
+  smartSelectInput.addEventListener("change", () => {
+    smartSelectEnabled = smartSelectInput.checked;
+    try { localStorage.setItem(SMART_SELECT_STORAGE_KEY, String(smartSelectEnabled)); } catch {}
+    setStatus(`Smart select ${smartSelectEnabled ? "on" : "off"} — marquee includes a group after 90% is selected`, "ok");
+  });
+}
+const optionsButton = document.getElementById("options-button");
+const optionsPopout = document.getElementById("options-popout");
+optionsButton?.addEventListener("click", () => {
+  const open = optionsPopout?.hidden;
+  if (optionsPopout) optionsPopout.hidden = !open;
+  optionsButton?.setAttribute("aria-expanded", String(Boolean(open)));
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!event.target?.closest?.("#options-menu")) {
+    if (optionsPopout) optionsPopout.hidden = true;
+    optionsButton?.setAttribute("aria-expanded", "false");
+  }
+});
+addEventListener("storage", (event) => {
+  if (event.key !== layoutKey || !event.newValue || dockContainer.classList.contains("active")) return;
+  loadLayout();
+  mountDockedPanels();
+});
+addEventListener("resize", () => {
+  layoutPanels.filter((panel) => !panel.dataset.dockSlot).forEach((panel) => panelStyle(panel, panelRect(panel)));
+  updateViewportLayout();
+  saveLayout();
+});
+
+function setStatus(message, kind = "") {
+  status.textContent = message;
+  status.className = `status${kind ? ` ${kind}` : ""}`;
+}
+
+function markSynced() {
+  const stamp = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  document.querySelectorAll(".sync-time").forEach((element) => { element.textContent = `Last sync: ${stamp}`; });
+}
+
+let mirrorGroundTarget = null;
+function renderGroundTarget(target) {
+  const value = typeof target === "string" ? target : target?.target;
+  mirrorGroundTarget = typeof value === "string" && value.trim() ? value.trim() : null;
+  if (groundTargetLabel) groundTargetLabel.textContent = mirrorGroundTarget ? `Current: ${mirrorGroundTarget}` : "No ground part set";
+  if (groundClearButton) groundClearButton.disabled = !mirrorGroundTarget;
+  if (groundSetButton) groundSetButton.disabled = !mirrorMode || !selected?.object;
+}
+
+async function loadGroundTarget() {
+  if (!mirrorMode) return;
+  try {
+    const response = await fetch(`./mirror/ground-target?read=${Date.now()}`, { headers: { accept: "application/json" }, cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || data?.ok !== true) throw new Error(data?.error || `ground HTTP ${response.status}`);
+    renderGroundTarget(data.groundTarget ?? null);
+  } catch (error) {
+    setStatus(`ground target unavailable: ${error.message}`, "error");
+  }
+}
+
+async function setMirrorGroundTarget(target, label) {
+  try {
+    const response = await fetch("./mirror/ground-target", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ mode: "set", target }),
+    });
+    const data = await response.json();
+    if (!response.ok || data?.ok !== true) throw new Error(data?.error || `ground HTTP ${response.status}`);
+    renderGroundTarget(data.groundTarget ?? target);
+    setStatus(`${label} set as map ground`, "ok");
+  } catch (error) {
+    setStatus(`ground target failed: ${error.message}`, "error");
+  }
+}
+
+groundSetButton?.addEventListener("click", () => {
+  const object = selected?.object;
+  const target = object?.userData?.fullPath || object?.userData?.path;
+  if (!target) return setStatus("Select a mirror instance first");
+  setMirrorGroundTarget(target, object.userData.name || target);
+});
+groundClearButton?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("./mirror/ground-target", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ mode: "clear" }),
+    });
+    const data = await response.json();
+    if (!response.ok || data?.ok !== true) throw new Error(data?.error || `ground HTTP ${response.status}`);
+    renderGroundTarget(null);
+    setStatus("map ground cleared", "ok");
+  } catch (error) {
+    setStatus(`ground clear failed: ${error.message}`, "error");
+  }
+});
+
+function setOpCount(count) {
+  opCount = count;
+  const stale = stageOps.filter(isEmptyPropOp).length;
+  hudtext.textContent = `${opCount} ops staged${stale ? ` · ${stale} stale` : ""}`;
+}
+
+function disposeGroup(root) {
+  root.traverse((node) => {
+    if (!node.isMesh) return;
+    if (node.userData?.instancedProxy) return;
+    node.geometry?.dispose();
+    if (Array.isArray(node.material)) {
+      node.material.forEach((material) => material.dispose());
+    } else {
+      node.material?.dispose();
+    }
+  });
+}
+
+function deg2rad3(a) {
+  return (a || [0, 0, 0]).map((d) => THREE.MathUtils.degToRad(d));
+}
+
+function xyzDegToYxzRad(value) {
+  const radians = deg2rad3(value);
+  const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(...radians, "XYZ"));
+  const euler = new THREE.Euler().setFromQuaternion(quaternion, "YXZ");
+  return [euler.x, euler.y, euler.z];
+}
+
+function csgOp(part) {
+  return part.op || (part.negate ? "subtract" : "union");
+}
+
+function tagSelection(node, opIndex, partIndex = -1) {
+  node.userData.selection = { opIndex, partIndex };
+  return node;
+}
+
+function renderCsgProp(args, targetGroup, opIndex) {
+  const parts = args.parts || [];
+  const buckets = { union: [], subtract: [], intersect: [] };
+  for (const part of parts) {
+    const op = csgOp(part);
+    if (buckets[op]) buckets[op].push(part);
+    else buckets.union.push(part);
+  }
+  if (buckets.union.length === 0) return false;
+
+  const brushFor = (part) => {
+    const mesh = meshForPart({
+      ...part,
+      pos: [
+        args.center[0] + (part.pos?.[0] || 0),
+        args.center[1] + (part.pos?.[1] || 0),
+        args.center[2] + (part.pos?.[2] || 0),
+      ],
+      rot: xyzDegToYxzRad(part.rot),
+      color: part.color || [150, 150, 150],
+      material: part.material,
+      reflectance: part.reflectance,
+      transparency: part.transparency,
+      castShadow: part.castShadow,
+      usePartColor: part.usePartColor,
+      materialVariant: part.materialVariant,
+      assets: part.assets,
+    });
+    const brush = new Brush(mesh.geometry, mesh.material);
+    brush.position.copy(mesh.position);
+    brush.quaternion.copy(mesh.quaternion);
+    brush.updateMatrixWorld(true);
+    return brush;
+  };
+
+  try {
+    const evaluator = new Evaluator();
+    let result = brushFor(buckets.union[0]);
+    const apply = (part, operation) => {
+      const next = evaluator.evaluate(result, brushFor(part), operation);
+      result.geometry.dispose();
+      result = next;
+    };
+    for (const part of buckets.union.slice(1)) apply(part, ADDITION);
+    for (const part of buckets.subtract) apply(part, SUBTRACTION);
+    for (const part of buckets.intersect) apply(part, INTERSECTION);
+    result.name = args.name || "PropCSG";
+    result.userData.csgPreview = true;
+    result.userData.locked = args.locked === true || parts.some((part) => part?.locked === true);
+    tagSelection(result, opIndex, -1);
+    targetGroup.add(result);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isEmptyPropOp(op) {
+  return op?.action === "build" && op?.args?.kind === "prop" && Array.isArray(op.args.parts) && op.args.parts.length === 0;
+}
+
+// A staged op is {action:"build", args: BUILD_SPEC}. kind="prop" is the only kind
+// three.js can render exactly (raw primitive parts, same as Studio's buildProp) —
+// every other kind is a labeled bbox placeholder (see plan: fine geometry for those
+// only exists in the Luau builders, porting it here would risk drift).
+function renderOp(op, opIndex, targetGroup = group) {
+  if (isEmptyPropOp(op)) return;
+  const args = op.args || {};
+  const center = args.center || [0, 0, 0];
+  if (args.kind === "prop" && Array.isArray(args.parts)) {
+    const useCsg = csgMode === "preview" && args.csg === true && args.parts.length <= 48;
+    if (useCsg && renderCsgProp({ ...args, center }, targetGroup, opIndex)) return;
+    for (let partIndex = 0; partIndex < args.parts.length; partIndex += 1) {
+        const p = args.parts[partIndex];
+        const pos = [center[0] + (p.pos?.[0] || 0), center[1] + (p.pos?.[1] || 0), center[2] + (p.pos?.[2] || 0)];
+        const mesh = addPart(targetGroup, {
+          shape: p.shape || "box",
+          pos,
+          rot: xyzDegToYxzRad(p.rot),
+          size: p.size,
+          color: p.color || [150, 150, 150],
+          material: p.material,
+          reflectance: p.reflectance,
+          transparency: p.transparency,
+          castShadow: p.castShadow,
+          locked: p.locked ?? args.locked,
+          usePartColor: p.usePartColor,
+          materialVariant: p.materialVariant,
+          assets: p.assets,
+        });
+        mesh.name = p.name || `${args.name || "prop"}[${partIndex}]`;
+        tagSelection(mesh, opIndex, partIndex);
+    }
+  } else {
+    const size = args.size || [4, 4, 4];
+    const placeholder = addPlaceholder(targetGroup, center, size, `${args.kind || op.action}${args.name ? " " + args.name : ""}`);
+    placeholder.userData.locked = args.locked === true;
+    tagSelection(placeholder, opIndex, -1);
+  }
+}
+
+function selectionIdentity(opIndex, partIndex, ops) {
+  const op = ops[opIndex];
+  const args = op?.args || {};
+  const opName = typeof args.name === "string" && args.name.trim() ? args.name : null;
+  const sameOpName = opName && ops.filter((item) => item?.args?.name === opName).length === 1 ? opName : null;
+  const parts = args.kind === "prop" && Array.isArray(args.parts) ? args.parts : [];
+  const partName = partIndex >= 0 && typeof parts[partIndex]?.name === "string" && parts[partIndex].name.trim()
+    ? parts[partIndex].name
+    : null;
+  const samePartName = partName && parts.filter((part) => part?.name === partName).length === 1 ? partName : null;
+  return { opIndex, partIndex, opName: sameOpName, partName: samePartName };
+}
+
+function remapSelection(ref, ops) {
+  if (!ref?.opName) return ref;
+  const opMatches = ops.reduce((matches, op, index) => {
+    if (op?.args?.name === ref.opName) matches.push(index);
+    return matches;
+  }, []);
+  if (opMatches.length !== 1) return null;
+  const opIndex = opMatches[0];
+  if (ref.partIndex < 0 || !ref.partName) return { opIndex, partIndex: ref.partIndex };
+  const parts = ops[opIndex]?.args?.kind === "prop" && Array.isArray(ops[opIndex].args.parts) ? ops[opIndex].args.parts : [];
+  const partMatches = parts.reduce((matches, part, index) => {
+    if (part?.name === ref.partName) matches.push(index);
+    return matches;
+  }, []);
+  return { opIndex, partIndex: partMatches.length === 1 ? partMatches[0] : ref.partIndex };
+}
+
+function replaceStage(ops, previousOps = stageOps) {
+  const cameraView = captureCameraView();
+  const nextGroup = new THREE.Group();
+  try {
+    for (let index = 0; index < ops.length; index += 1) renderOp(ops[index], index, nextGroup);
+  } catch {
+    disposeGroup(nextGroup);
+    return false;
+  }
+
+  const previousGroup = group;
+  scene.add(nextGroup);
+  scene.remove(previousGroup);
+  group = nextGroup;
+  setOpCount(ops.length);
+  disposeGroup(previousGroup);
+  clearDragSnapshot();
+  const wanted = selectedObjects.map(({ opIndex, partIndex }) => selectionIdentity(opIndex, partIndex, previousOps));
+  const primaryWanted = selected && selectionIdentity(selected.opIndex, selected.partIndex, previousOps);
+  selected = null;
+  selectedObjects = [];
+  detachSelection();
+  if (wanted.length) selectByRefs(wanted.map((ref) => remapSelection(ref, ops)), remapSelection(primaryWanted, ops));
+  renderExplorer();
+  renderProperties();
+  // A fresh stage-sync replaces the group, so playback state has to follow it: either
+  // replay the new build (auto) or make sure everything is visible again.
+  if (buildAuto?.checked) startBuildPlayback();
+  else stopBuildPlayback(true);
+  restoreCameraView(cameraView);
+  return true;
+}
+
+function mirrorOpsFromDump(dump) {
+  return (dump.parts || []).map((part) => ({
+    action: "build",
+    args: {
+      kind: "prop",
+      name: part.name || part.class || "Part",
+      center: part.pos || [0, 0, 0],
+      size: part.size || [1, 1, 1],
+      rot: yxzRadToXyzDeg(part.rot),
+      color: part.color,
+      material: part.material,
+      transparency: part.transparency,
+      reflectance: part.reflectance,
+      castShadow: part.castShadow,
+      materialVariant: part.materialVariant,
+      usePartColor: part.usePartColor,
+      assets: part.assets,
+    },
+  }));
+}
+
+function mirrorRevisionOf(dump) {
+  const revision = Number(dump?._buildkitMirrorRevision);
+  return Number.isInteger(revision) && revision >= 0 ? revision : null;
+}
+
+function acceptMirrorDump(dump) {
+  const revision = mirrorRevisionOf(dump);
+  if (revision !== null && revision < lastMirrorRevision) return false;
+  if (revision !== null) lastMirrorRevision = revision;
+  stageDump = clone(dump);
+  if (mirrorMode) renderMirrorDump(stageDump);
+  else renderExplorer();
+  return true;
+}
+
+function renderMirrorDump(dump) {
+  const cameraView = captureCameraView();
+  const revision = mirrorRevisionOf(dump);
+  if (revision !== null) lastMirrorRevision = Math.max(lastMirrorRevision, revision);
+  const parts = Array.isArray(dump.parts) ? dump.parts : [];
+  const nextGroup = new THREE.Group();
+  addMirrorParts(nextGroup, parts);
+  const selectedPath = selected?.object?.userData?.path || selected?.object?.userData?.fullPath;
+  clearDragSnapshot();
+  const previousGroup = group;
+  scene.add(nextGroup);
+  scene.remove(previousGroup);
+  group = nextGroup;
+  stageDump = clone(dump);
+  stageOps = mirrorOpsFromDump(stageDump);
+  mirrorTreePartIndices = indexMirrorTree(stageDump.tree, stageDump.parts);
+  selected = null;
+  selectedObjects = [];
+  detachSelection();
+  if (selectedPath) {
+    let nextSelection = null;
+    group.traverse((node) => {
+      const nodePath = node.userData.path || node.userData.fullPath;
+      if (!nextSelection && nodePath === selectedPath && isExplorerSelectableStageObject(node)) nextSelection = node;
+    });
+    if (nextSelection) setSelection([nextSelection], nextSelection);
+  }
+  disposeGroup(previousGroup);
+  restoreCameraView(cameraView);
+  hudtext.textContent = `${dump.dumped ?? parts.length}/${dump.totalParts ?? parts.length} parts · ${mirrorCoverageText(dump)}`;
+  renderExplorer();
+  renderProperties();
+}
+
+function detachSelection() {
+  transform?.detach();
+  for (const helper of selectionHelpers) {
+    scene.remove(helper);
+    helper.geometry?.dispose();
+    if (Array.isArray(helper.material)) helper.material.forEach((material) => material.dispose());
+    else helper.material?.dispose();
+  }
+  selectionHelpers = [];
+}
+
+function findObject(opIndex, partIndex) {
+  let found = null;
+  group.traverse((node) => {
+    if (found || !node.userData.selection) return;
+    const ref = node.userData.selection;
+    if (ref.opIndex === opIndex && ref.partIndex === partIndex) found = node;
+  });
+  return found;
+}
+
+function isExplorerSelectableStageObject(object) {
+  return Boolean(object?.isMesh && object.userData.selection);
+}
+
+function objectsForSelection(opIndex, partIndex = null) {
+  const objects = [];
+  group.traverse((node) => {
+    const ref = node.userData.selection;
+    if (!ref || ref.opIndex !== opIndex || (partIndex !== null && ref.partIndex !== partIndex)) return;
+    if (isExplorerSelectableStageObject(node)) objects.push(node);
+  });
+  return objects;
+}
+
+function isSelectableStageObject(object) {
+  // Locked mirrors Studio: a locked part cannot be clicked or marquee-picked in the
+  // viewport. It stays selectable from the Explorer, exactly as Studio behaves — the lock
+  // protects you from grabbing it by accident, it doesn't hide it.
+  // CSG preview meshes are the selectable whole-prop representation.
+  return Boolean(object?.isMesh && object.userData.selection && !object.userData.locked);
+}
+
+function csgPreviewObject(opIndex) {
+  const object = findObject(opIndex, -1);
+  return object?.userData.csgPreview ? object : null;
+}
+
+function stageSelectionObject(opIndex, partIndex) {
+  return findObject(opIndex, partIndex) || (partIndex >= 0 ? csgPreviewObject(opIndex) : null);
+}
+
+function selectableStageObjects() {
+  const objects = [];
+  group.traverse((node) => { if (isSelectableStageObject(node)) objects.push(node); });
+  return objects;
+}
+
+function selectionRef(object) {
+  const ref = object?.userData?.selection;
+  return ref && { opIndex: ref.opIndex, partIndex: ref.partIndex };
+}
+
+function selectedStagePartRefs() {
+  const refs = [];
+  const seen = new Set();
+  for (const item of selectedObjects) {
+    const source = { index: item.opIndex, partIndex: item.partIndex };
+    if (item.partIndex < 0 || !validStagePropPartRef(source)) continue;
+    const key = `${source.index}:${source.partIndex}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push(source);
+  }
+  return refs;
+}
+
+function updateGroupingButtons() {
+  const refs = selectedStagePartRefs();
+  const propCount = new Set(refs.map((ref) => ref.index)).size;
+  if (groupButton) groupButton.disabled = mirrorMode || refs.length < 2 || propCount < 2;
+  if (ungroupButton) ungroupButton.disabled = mirrorMode || refs.length === 0;
+}
+
+function updateLockButton() {
+  const patches = lockPatchesForSelection(stageOps, selectedObjects);
+  if (!lockButton) return;
+  lockButton.disabled = mirrorMode || patches.length === 0;
+  lockButton.textContent = lockPatchValue(patches[0]) ? "Lock" : "Unlock";
+}
+
+function lockPatchValue(item) {
+  return item?.partIndex >= 0 ? item.patch?.locked === true : item?.patch?.args?.locked === true;
+}
+
+function isSelectedRef(opIndex, partIndex) {
+  return selectedObjects.some((item) => item.opIndex === opIndex &&
+    (item.partIndex === partIndex || (partIndex >= 0 && item.partIndex < 0)));
+}
+
+function isStageOpSelected(opIndex) {
+  const args = stageOps[opIndex]?.args || {};
+  if (args.kind === "prop" && Array.isArray(args.parts)) {
+    const children = objectsForSelection(opIndex).filter((object) => object.userData.selection.partIndex >= 0);
+    return children.length > 0
+      ? children.every((object) => isSelectedRef(opIndex, object.userData.selection.partIndex))
+      : isSelectedRef(opIndex, -1);
+  }
+  return isSelectedRef(opIndex, -1);
+}
+
+function selectStageOp(opIndex) {
+  const args = stageOps[opIndex]?.args || {};
+  if (args.kind === "prop" && Array.isArray(args.parts)) {
+    const children = objectsForSelection(opIndex).filter((object) => object.userData.selection.partIndex >= 0);
+    if (children.length) return setSelection(children, children[0]);
+  }
+  const object = findObject(opIndex, -1);
+  setSelection(object && isExplorerSelectableStageObject(object) ? [object] : [], object);
+}
+
+function stageExplorerObjects(opIndex, partIndex = -1) {
+  if (partIndex >= 0) {
+    const object = stageSelectionObject(opIndex, partIndex);
+    if (object && isExplorerSelectableStageObject(object)) return [object];
+    return [];
+  }
+  const args = stageOps[opIndex]?.args || {};
+  if (args.kind === "prop" && Array.isArray(args.parts)) {
+    const children = objectsForSelection(opIndex).filter((object) => object.userData.selection.partIndex >= 0);
+    if (children.length) return children;
+    const preview = csgPreviewObject(opIndex);
+    return preview && isExplorerSelectableStageObject(preview) ? [preview] : [];
+  }
+  const object = findObject(opIndex, -1);
+  return object && isExplorerSelectableStageObject(object) ? [object] : [];
+}
+
+function toggleExplorerObjectSelection(objects) {
+  const selectable = objects.filter(isExplorerSelectableStageObject);
+  if (!selectable.length) return;
+  const target = new Set(selectable);
+  const allSelected = selectable.every((object) => selectedObjects.some((item) => item.object === object));
+  const kept = selectedObjects.filter((item) => !target.has(item.object));
+  const next = allSelected ? kept.map((item) => item.object) : [...kept.map((item) => item.object), ...selectable];
+  const primary = selected?.object && next.includes(selected.object) ? selected.object : next[0];
+  setSelection(next, primary);
+}
+
+function toggleStageExplorerSelection(opIndex, partIndex = -1) {
+  const objects = stageExplorerObjects(opIndex, partIndex);
+  if (!objects.length) return;
+  toggleExplorerObjectSelection(objects);
+}
+
+function selectStageExplorerRow(opIndex, partIndex, event) {
+  if (event?.altKey) toggleStageExplorerSelection(opIndex, partIndex);
+  else if (partIndex < 0) selectStageOp(opIndex);
+  else selectByIndex(opIndex, partIndex);
+}
+
+function updateSelectionHelpers() {
+  selectionHelpers.forEach((helper) => helper.update());
+}
+
+function selectionUsesTransformProxy() {
+  const data = selected?.object?.userData || {};
+  return selectedObjects.length > 1 || data.csgPreview === true || data.rebuiltCsg === true;
+}
+
+function attachSelectionTransform() {
+  if (!transform || !selected || mirrorMode) {
+    transform?.detach();
+    return;
+  }
+  if (!selectionUsesTransformProxy()) {
+    transform.attach(selected.object);
+    return;
+  }
+  scene.updateMatrixWorld(true);
+  const bounds = new THREE.Box3();
+  selectedObjects.forEach(({ object }) => bounds.expandByObject(object));
+  if (bounds.isEmpty()) {
+    transform.attach(selected.object);
+    return;
+  }
+  selectionTransformProxy.position.copy(bounds.getCenter(new THREE.Vector3()));
+  selectionTransformProxy.quaternion.copy(selected.object.quaternion);
+  selectionTransformProxy.scale.set(1, 1, 1);
+  selectionTransformProxy.updateMatrixWorld(true);
+  transform.attach(selectionTransformProxy);
+}
+
+function setSelection(objects, primaryObject = objects[0]) {
+  const allowed = new Set();
+  group.traverse((node) => {
+    if (isExplorerSelectableStageObject(node)) allowed.add(node);
+  });
+  const unique = [];
+  const seen = new Set();
+  for (const object of objects) {
+    if (!allowed.has(object) || seen.has(object)) continue;
+    seen.add(object);
+    unique.push(object);
+  }
+  detachSelection();
+  selectedObjects = unique.map((object) => ({ ...selectionRef(object), object }));
+  selected = selectedObjects.find((item) => item.object === primaryObject) || selectedObjects[0] || null;
+  for (const item of selectedObjects) {
+    const helper = new THREE.BoxHelper(item.object, item === selected ? 0x3d9bff : 0x76c6ff);
+    helper.material.depthTest = false;
+    helper.material.transparent = true;
+    helper.material.opacity = item === selected ? 1 : 0.8;
+    helper.renderOrder = 20;
+    selectionHelpers.push(helper);
+    scene.add(helper);
+  }
+  attachSelectionTransform();
+  renderExplorer();
+  renderProperties();
+  updateGroupingButtons();
+  updateLockButton();
+  renderGroundTarget(mirrorGroundTarget);
+}
+
+function selectionBounds() {
+  scene.updateMatrixWorld(true);
+  const bounds = new THREE.Box3();
+  const items = selectedObjects.length ? selectedObjects : (selected ? [selected] : []);
+  items.forEach(({ object }) => bounds.expandByObject(object));
+  return bounds;
+}
+
+function renderSelectionSummary(container, hintText) {
+  const section = document.createElement("div");
+  section.className = "prop-section";
+  const heading = document.createElement("div");
+  heading.className = "prop-heading";
+  heading.textContent = "Selection";
+  section.append(heading, document.createTextNode(`${selectedObjects.length} items selected`));
+  const bounds = selectionBounds();
+  if (!bounds.isEmpty()) {
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const details = document.createElement("div");
+    details.className = "hint";
+    details.style.marginTop = "6px";
+    details.textContent = `Bounds ${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(", ")} · center ${[center.x, center.y, center.z].map((value) => value.toFixed(2)).join(", ")}`;
+    section.append(details);
+  }
+  if (hintText) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.marginTop = "6px";
+    hint.textContent = hintText;
+    section.append(hint);
+  }
+  container.append(section);
+}
+
+function selectByRefs(refs, primaryRef) {
+  const objects = refs.filter(Boolean).map(({ opIndex, partIndex }) => stageSelectionObject(opIndex, partIndex)).filter(isExplorerSelectableStageObject);
+  const primaryObject = primaryRef && stageSelectionObject(primaryRef.opIndex, primaryRef.partIndex);
+  setSelection(objects, primaryObject);
+}
+
+function selectByIndex(opIndex, partIndex = -1) {
+  const object = stageSelectionObject(opIndex, partIndex);
+  setSelection(object && isExplorerSelectableStageObject(object) ? [object] : [], object);
+}
+
+function clearAll() {
+  replaceStage([]);
+}
+
+function isStageOp(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    (value.action === "build" || value.action === "edit") &&
+    value.args && typeof value.args === "object" && !Array.isArray(value.args);
+}
+
+function validStageOps(value) {
+  if (!Array.isArray(value) || !value.every(isStageOp)) return false;
+  const partCount = value.reduce((total, op) => total + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0);
+  return value.length + partCount <= 5000;
+}
+
+function isGenerationState(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    typeof value.name === "string" && typeof value.enabled === "boolean" &&
+    (value.error === undefined || typeof value.error === "string");
+}
+
+function isSceneNode(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (typeof value.name !== "string" || typeof value.class !== "string") return false;
+  return value.children === undefined || Array.isArray(value.children) && value.children.every(isSceneNode);
+}
+
+function isDump(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.coverage !== undefined && !["complete", "truncated", "missing"].includes(value.coverage)) return false;
+  if (value.parts !== undefined && (!Array.isArray(value.parts) || !value.parts.every((part) => part && typeof part === "object" && !Array.isArray(part)))) return false;
+  if (value.nodes !== undefined && !Array.isArray(value.nodes)) return false;
+  if (value.root !== undefined && (!value.root || typeof value.root !== "object" || Array.isArray(value.root))) return false;
+  if (value.hierarchy !== undefined && (!value.hierarchy || typeof value.hierarchy !== "object" || Array.isArray(value.hierarchy))) return false;
+  if (value.tree !== undefined && !(isSceneNode(value.tree) || Array.isArray(value.tree) && value.tree.every(isSceneNode))) return false;
+  return Array.isArray(value.parts) || Array.isArray(value.nodes) || value.root !== undefined || value.hierarchy !== undefined || value.tree !== undefined;
+}
+
+function mirrorCoverageText(dump) {
+  if (dump?.coverage === "missing") return "target missing";
+  if (dump?.coverage === "truncated" || dump?.truncated) return "partial / truncated";
+  return "complete";
+}
+
+function mirrorStatusText(dump, action) {
+  return `${action} (${mirrorCoverageText(dump)})`;
+}
+
+function parseStageSync(raw) {
+  let payload;
+  if (typeof raw === "string") {
+    try { payload = JSON.parse(raw); } catch { return null; }
+  } else payload = raw;
+  const ops = Array.isArray(payload) ? payload : payload && payload.ops;
+  if (!Array.isArray(ops) || !ops.every(isStageOp)) return null;
+  if (Array.isArray(payload)) return { ops };
+  if (!payload || typeof payload !== "object") return null;
+  const revision = Number.isInteger(payload.revision) && payload.revision >= 0 ? payload.revision : undefined;
+  if (payload.dump !== undefined && !isDump(payload.dump)) return null;
+  if (payload.errors !== undefined && (!Array.isArray(payload.errors) || !payload.errors.every((e) => typeof e === "string"))) return null;
+  if (!Object.prototype.hasOwnProperty.call(payload, "generations")) return { ops, dump: payload.dump, ...(revision === undefined ? {} : { revision }) };
+  const generations = payload.generations;
+  return Array.isArray(generations) && generations.every(isGenerationState)
+    ? { ops, generations, dump: payload.dump, ...(revision === undefined ? {} : { revision }) }
+    : null;
+}
+
+function appendOp(op) {
+  if (!isStageOp(op)) return;
+  const previous = stageOps;
+  const next = stageOps.concat([op]);
+  stageOps = clone(next);
+  if (!replaceStage(stageOps, previous)) {
+    stageOps = previous;
+    return;
+  }
+  updateCsgLabel();
+}
+
+function generationItems(payload) {
+  const items = Array.isArray(payload) ? payload : payload?.generations;
+  if (!Array.isArray(items)) throw new Error("invalid generations response");
+  return items.filter((item) => item && typeof item.name === "string");
+}
+
+function isHistoryEntry(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Number.isInteger(value.index) && typeof value.label === "string" &&
+    typeof value.timestamp === "string" && (value.current === undefined || typeof value.current === "boolean");
+}
+
+function historyItems(payload) {
+  const items = Array.isArray(payload) ? payload : payload?.history || payload?.entries;
+  if (!Array.isArray(items) || !items.every(isHistoryEntry)) throw new Error("invalid history response");
+  const current = Number.isInteger(payload?.index)
+    ? payload.index
+    : Number.isInteger(payload?.current) ? payload.current : null;
+  return items.map((item) => ({ ...item, current: item.current === true || item.index === current }));
+}
+
+function historyTime(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
+
+function renderHistory(items, unavailable = false) {
+  const entries = Array.isArray(items) ? items : [];
+  const currentPosition = entries.findIndex((entry) => entry.current === true);
+  historyPosition.textContent = unavailable
+    ? "History unavailable"
+    : entries.length
+      ? currentPosition >= 0 ? `Current: ${currentPosition + 1}/${entries.length}` : `${entries.length} saved states`
+      : "No history yet";
+  historyUndoButton.disabled = mirrorMode || currentPosition <= 0;
+  historyRedoButton.disabled = mirrorMode || currentPosition < 0 || currentPosition >= entries.length - 1;
+  historyList.replaceChildren();
+  if (unavailable) {
+    historyList.innerHTML = '<div class="empty">History is unavailable in this server.</div>';
+    return;
+  }
+  if (!entries.length) {
+    historyList.innerHTML = '<div class="empty">No stage edits yet.</div>';
+    return;
+  }
+  entries.forEach((entry, position) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `history-entry${entry.current ? " current" : ""}`;
+    button.title = entry.current ? "Current stage state" : `Restore state ${position + 1}`;
+    const label = document.createElement("span");
+    label.className = "history-entry-label";
+    label.textContent = entry.label;
+    const meta = document.createElement("span");
+    meta.className = "history-entry-meta";
+    meta.textContent = `#${position + 1}${historyTime(entry.timestamp) ? ` · ${historyTime(entry.timestamp)}` : ""}`;
+    button.append(label, meta);
+    button.addEventListener("click", () => restoreHistory(entry.index));
+    historyList.append(button);
+  });
+}
+
+let historyRequestId = 0;
+async function loadHistory() {
+  const requestId = ++historyRequestId;
+  try {
+    const response = await fetch(stageRequestUrl(`/stage/history?sync=${Date.now()}`), { headers: { accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const entries = historyItems(await response.json());
+    if (requestId !== historyRequestId) return false;
+    renderHistory(entries);
+    return true;
+  } catch {
+    if (requestId === historyRequestId) renderHistory([], true);
+    return false;
+  }
+}
+
+function moveHistory(path, label) {
+  if (mirrorMode) return Promise.resolve(false);
+  return postStage(path, undefined, label).then((data) => {
+    if (data.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid history snapshot");
+    return loadHistory();
+  });
+}
+
+function restoreHistory(index) {
+  if (mirrorMode || !Number.isInteger(index)) return Promise.resolve(false);
+  return postStage("/stage/history/restore", { index }, "restore history").then((data) => {
+    if (data.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid history snapshot");
+    return loadHistory();
+  }).catch((error) => {
+    setStatus(`history restore failed: ${error.message}`, "error");
+    return false;
+  });
+}
+
+historyUndoButton?.addEventListener("click", () => moveHistory("/stage/undo", "undo").catch((error) => setStatus(`undo unavailable: ${error.message}`, "error")));
+historyRedoButton?.addEventListener("click", () => moveHistory("/stage/redo", "redo").catch((error) => setStatus(`redo unavailable: ${error.message}`, "error")));
+
+function showGenerationsMessage(message) {
+  generationsList.textContent = message;
+}
+
+function renderGenerations(items) {
+  const previous = new Map(stageGenerations.map((item) => [item.name, item]));
+  stageGenerations = items.map((item) => {
+    const prior = previous.get(item.name);
+    return prior && Array.isArray(prior.ops) && !Array.isArray(item.ops)
+      ? { ...clone(item), ops: clone(prior.ops) }
+      : clone(item);
+  });
+  refreshLibraryGeneratorStates();
+}
+
+let libraryPresets = [];
+let libraryCategories = [];
+let libraryTab = "user";
+let libraryCategory = "";
+
+function refreshLibraryGeneratorStates() {
+  if (!libraryPresets.length || !stageGenerations.length) return;
+  const states = new Map(stageGenerations.map((item) => [item.name, item]));
+  let changed = false;
+  libraryPresets = libraryPresets.map((item) => {
+    if (!item.librarySource) return item;
+    const state = states.get(item.name);
+    if (!state) return item;
+    const next = { ...item, enabled: state.enabled, ops: clone(state.ops || item.ops) };
+    if (state.error) next.error = state.error;
+    else delete next.error;
+    changed ||= item.enabled !== next.enabled || JSON.stringify(item.ops) !== JSON.stringify(next.ops) || item.error !== next.error;
+    return next;
+  });
+  if (changed) renderLibrary();
+}
+
+async function setGenerationEnabled(name, enabled, control = null) {
+  const current = stageGenerations.find((item) => item.name === name)?.enabled ?? libraryPresets.find((item) => item.librarySource && item.name === name)?.enabled;
+  if (typeof current !== "boolean") return setStatus(`generator not found: ${friendlyLabel(name)}`, "error");
+  if (control) {
+    control.checked = current;
+    control.disabled = true;
+  }
+  try {
+    const data = await postStage("/generations", { name, enabled }, `${enabled ? "enable" : "disable"} ${friendlyLabel(name)}`);
+    if (data.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid generation snapshot");
+    setStatus(`${friendlyLabel(name)} ${enabled ? "enabled" : "disabled"}`, "ok");
+  } catch (error) {
+    setStatus(`generator update failed: ${error.message}`, "error");
+  } finally {
+    if (control?.isConnected) {
+      const actual = (stageGenerations.find((item) => item.name === name)?.enabled ?? libraryPresets.find((item) => item.librarySource && item.name === name)?.enabled) === true;
+      control.checked = actual;
+      if (control.nextSibling) control.nextSibling.textContent = actual ? "Generator enabled" : "Generator disabled";
+      control.disabled = false;
+    }
+  }
+}
+
+function removeStaleStageOp(opIndex) {
+  if (!isEmptyPropOp(stageOps[opIndex])) return setStatus("stale op changed; refresh and try again", "error");
+  const owner = generatorOwning(opIndex);
+  if (owner) return setGenerationEnabled(owner, false);
+  postStage("/stage/patch", { index: opIndex, patch: { remove: true } }, "remove stale op")
+    .catch((error) => setStatus(`stale op removal failed: ${error.message}`, "error"));
+}
+
+function isLibraryPreset(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.format !== "buildkit-library" || ![1, 2].includes(value.version)) return false;
+  if (typeof value.name !== "string" || !value.name.trim() || !validStageOps(value.ops)) return false;
+  return value.version === 1 ||
+    ["user", "ai"].includes(value.origin) && ["saved", "recent"].includes(value.kind) &&
+    (value.category === null || typeof value.category === "string" && value.category.length > 0);
+}
+
+function libraryPresetFrom(value) {
+  if (!isLibraryPreset(value)) throw new Error("invalid buildkit library preset");
+  const now = new Date().toISOString();
+  return {
+    format: "buildkit-library",
+    version: 2,
+    name: value.name.trim(),
+    created: typeof value.created === "string" && value.created ? value.created : now,
+    updated: typeof value.updated === "string" && value.updated ? value.updated : now,
+    ops: clone(value.ops),
+    origin: value.version === 2 ? value.origin : "user",
+    kind: value.version === 2 ? value.kind : "saved",
+    category: value.version === 2 ? value.category : null,
+    ...(value.preview !== undefined ? { preview: typeof value.preview === "string" ? value.preview : JSON.stringify(value.preview) } : {}),
+  };
+}
+
+function selectedLibraryOps() {
+  if (!selectedObjects.length && !selected) return [];
+  const byOp = new Map();
+  for (const item of (selectedObjects.length ? selectedObjects : [selected])) {
+    const op = stageOps[item.opIndex];
+    if (!op) continue;
+    let entry = byOp.get(item.opIndex);
+    if (!entry) byOp.set(item.opIndex, entry = { op, parts: new Set(), whole: false });
+    if (item.partIndex < 0) entry.whole = true;
+    else entry.parts.add(item.partIndex);
+  }
+  return [...byOp.values()].map(({ op, parts, whole }) => {
+    const next = clone(op);
+    if (!whole && next.args?.kind === "prop" && Array.isArray(next.args.parts)) {
+      next.args.parts = next.args.parts.filter((_, index) => parts.has(index));
+      if (!next.args.parts.length) return null;
+    }
+    return next;
+  }).filter(Boolean);
+}
+
+function libraryPreview(ops) {
+  const parts = [];
+  for (const op of ops) {
+    const args = op.args || {};
+    if (args.kind === "prop" && Array.isArray(args.parts)) {
+      for (const part of args.parts) parts.push({
+        pos: [0, 1, 2].map((index) => Number(args.center?.[index] || 0) + Number(part.pos?.[index] || 0)),
+        size: vec3(part.size, [1, 1, 1]),
+        color: vec3(part.color, [150, 150, 150]),
+      });
+    } else if (Array.isArray(args.center)) parts.push({ pos: vec3(args.center), size: vec3(args.size, [4, 4, 4]) });
+  }
+  if (!parts.length) return null;
+  const minX = Math.min(...parts.map((part) => part.pos[0] - part.size[0] / 2));
+  const maxX = Math.max(...parts.map((part) => part.pos[0] + part.size[0] / 2));
+  const minZ = Math.min(...parts.map((part) => part.pos[2] - part.size[2] / 2));
+  const maxZ = Math.max(...parts.map((part) => part.pos[2] + part.size[2] / 2));
+  return {
+    minX, maxX, minZ, maxZ,
+    parts: parts.map(({ pos, size, color }) => ({ x: pos[0], z: pos[2], w: size[0], h: size[2], color })),
+  };
+}
+
+function drawFlatLibraryPreview(canvas, preview, ops) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  let parsedPreview = preview;
+  if (typeof parsedPreview === "string") { try { parsedPreview = JSON.parse(parsedPreview); } catch { parsedPreview = null; } }
+  const value = libraryPreview(ops) || (parsedPreview && Array.isArray(parsedPreview.parts) ? parsedPreview : null);
+  context.fillStyle = "#171a22";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (!value?.parts?.length) return;
+  const minX = Number(value.minX ?? Math.min(...value.parts.map((part) => part.x)));
+  const maxX = Number(value.maxX ?? Math.max(...value.parts.map((part) => part.x)));
+  const minZ = Number(value.minZ ?? Math.min(...value.parts.map((part) => part.z)));
+  const maxZ = Number(value.maxZ ?? Math.max(...value.parts.map((part) => part.z)));
+  const scale = Math.min((canvas.width - 12) / Math.max(maxX - minX, 1), (canvas.height - 12) / Math.max(maxZ - minZ, 1));
+  for (const part of value.parts) {
+    const width = Math.max(2, Number(part.w || 1) * scale);
+    const height = Math.max(2, Number(part.h || 1) * scale);
+    const x = canvas.width / 2 + (Number(part.x) - (minX + maxX) / 2) * scale - width / 2;
+    const y = canvas.height / 2 + (Number(part.z) - (minZ + maxZ) / 2) * scale - height / 2;
+    const color = Array.isArray(part.color) && part.color.length === 3 ? part.color.map((value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0)))) : [150, 150, 150];
+    context.fillStyle = `rgb(${color[0]} ${color[1]} ${color[2]})`;
+    context.fillRect(x, y, width, height);
+    context.strokeStyle = "rgba(255,255,255,.18)";
+    context.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
+  }
+}
+
+let libraryPreviewRig = null;
+let libraryPreviewUnavailable = false;
+const libraryPreviewCache = new Map();
+const libraryPreviewQueue = [];
+let libraryPreviewQueued = false;
+const libraryPreviewObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    libraryPreviewObserver.unobserve(entry.target);
+    libraryPreviewQueue.push(entry.target);
+  }
+  if (libraryPreviewQueue.length && !libraryPreviewQueued) {
+    libraryPreviewQueued = true;
+    requestAnimationFrame(renderNextLibraryPreview);
+  }
+}, { root: generationsList, rootMargin: "120px" }) : null;
+
+function ensureLibraryPreviewRig() {
+  if (libraryPreviewRig || libraryPreviewUnavailable) return libraryPreviewRig;
+  try {
+    const canvas = document.createElement("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x171a22);
+    scene.add(new THREE.HemisphereLight(0xb8d7ff, 0x4f5160, 1.45));
+    const key = new THREE.DirectionalLight(0xfff0d0, 1.7);
+    key.position.set(5, 8, 6);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0x9fc5ff, 0.5);
+    fill.position.set(-6, 3, -5);
+    scene.add(fill);
+    libraryPreviewRig = { renderer, scene, camera: new THREE.PerspectiveCamera(38, 16 / 9, 0.01, 10000) };
+  } catch {
+    libraryPreviewUnavailable = true;
+  }
+  return libraryPreviewRig;
+}
+
+function drawLibraryPreview(canvas, preview, ops) {
+  const width = Math.max(160, Math.round(canvas.clientWidth || 320));
+  const height = Math.max(90, Math.round(width * 9 / 16));
+  canvas.width = width;
+  canvas.height = height;
+  const rig = ensureLibraryPreviewRig();
+  if (!rig) {
+    drawFlatLibraryPreview(canvas, preview, ops);
+    return;
+  }
+  const root = new THREE.Group();
+  try {
+    ops.forEach((op, index) => renderOp(op, index, root));
+    root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(root);
+    if (bounds.isEmpty()) throw new Error("library preset has no renderable bounds");
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const fit = previewCameraFit(sphere.radius, width / height, rig.camera.fov, 1.18);
+    const center = sphere.center;
+    const direction = new THREE.Vector3(1.15, 0.78, 1.25).normalize();
+    rig.camera.aspect = width / height;
+    rig.camera.position.copy(center).addScaledVector(direction, fit.distance);
+    rig.camera.near = fit.near;
+    rig.camera.far = fit.far;
+    rig.camera.lookAt(center);
+    rig.camera.updateProjectionMatrix();
+    rig.scene.add(root);
+    rig.renderer.setSize(width, height, false);
+    rig.renderer.render(rig.scene, rig.camera);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("library preview canvas unavailable");
+    context.clearRect(0, 0, width, height);
+    context.drawImage(rig.renderer.domElement, 0, 0, width, height);
+  } catch {
+    drawFlatLibraryPreview(canvas, preview, ops);
+  } finally {
+    rig.scene.remove(root);
+    disposeGroup(root);
+  }
+}
+
+function paintLibraryPreviewImage(canvas, source) {
+  const image = new Image();
+  image.addEventListener("load", () => {
+    if (!canvas.isConnected) return;
+    const context = canvas.getContext("2d");
+    context?.drawImage(image, 0, 0, canvas.width, canvas.height);
+  }, { once: true });
+  image.src = source;
+}
+
+function renderNextLibraryPreview() {
+  libraryPreviewQueued = false;
+  const canvas = libraryPreviewQueue.shift();
+  if (!canvas?.isConnected) {
+    if (libraryPreviewQueue.length) requestAnimationFrame(renderNextLibraryPreview);
+    return;
+  }
+  const { cacheKey, preview, ops } = canvas.libraryPreviewData;
+  const cached = libraryPreviewCache.get(cacheKey);
+  if (cached) paintLibraryPreviewImage(canvas, cached);
+  else {
+    drawLibraryPreview(canvas, preview, ops);
+    try { libraryPreviewCache.set(cacheKey, canvas.toDataURL("image/jpeg", 0.78)); } catch {}
+  }
+  if (libraryPreviewQueue.length) {
+    libraryPreviewQueued = true;
+    requestAnimationFrame(renderNextLibraryPreview);
+  }
+}
+
+function scheduleLibraryPreview(canvas, preset, cacheKey) {
+  drawFlatLibraryPreview(canvas, preset.preview, preset.ops);
+  const cached = libraryPreviewCache.get(cacheKey);
+  if (cached) return paintLibraryPreviewImage(canvas, cached);
+  canvas.libraryPreviewData = { cacheKey, preview: preset.preview, ops: preset.ops };
+  if (libraryPreviewObserver) libraryPreviewObserver.observe(canvas);
+  else {
+    libraryPreviewQueue.push(canvas);
+    if (!libraryPreviewQueued) { libraryPreviewQueued = true; requestAnimationFrame(renderNextLibraryPreview); }
+  }
+}
+
+function downloadLibraryPreset(preset) {
+  const blob = new Blob([JSON.stringify(preset, null, 2)], { type: "application/json" });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = `${preset.name.replace(/[^a-z0-9_-]+/gi, "-") || "buildkit-asset"}.bkasset.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 0);
+}
+
+function postLibrary(body, label) {
+  setStatus(`${label}...`);
+  return fetch(stageRequestUrl("/library"), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  }).then(async (response) => {
+    let data = null;
+    try { data = await response.json(); } catch {}
+    if (!response.ok || !data || data.ok !== true) throw new Error(data?.error || `invalid ${label} response`);
+    return data;
+  });
+}
+
+async function appendStageOpsAtRendererCenter(rawOps, displayName, successMessage) {
+  const renderableOps = rawOps.filter((op) => !isEmptyPropOp(op)).map(clone);
+  if (!renderableOps.length) throw new Error("preset has no renderable ops");
+  const previewGroup = new THREE.Group();
+  try {
+    renderableOps.forEach((op, index) => renderOp(op, index, previewGroup));
+    previewGroup.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(previewGroup);
+    if (bounds.isEmpty()) throw new Error("library preset has no renderable bounds");
+    const target = rendererCenterOnGround();
+    const targetArray = target.toArray();
+    const delta = previewPlacementDelta(
+      { minX: bounds.min.x, minY: bounds.min.y, minZ: bounds.min.z, maxX: bounds.max.x, maxY: bounds.max.y, maxZ: bounds.max.z },
+      targetArray,
+    );
+    const ops = renderableOps.map((op) => {
+      const next = clone(op);
+      next.args = { ...(next.args || {}) };
+      const center = vec3(next.args.center);
+      next.args.center = [center[0] + delta[0], center[1] + delta[1], center[2] + delta[2]];
+      return next;
+    });
+    const data = await postStage("/stage/append", { ops }, `add ${displayName}`);
+    if (data.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid stage snapshot");
+    const firstInsertedIndex = stageOps.length - ops.length;
+    const insertedObjects = [];
+    for (let index = firstInsertedIndex; index < stageOps.length; index += 1) {
+      insertedObjects.push(...stageExplorerObjects(index));
+    }
+    if (!insertedObjects.length) throw new Error("append snapshot did not contain renderable objects");
+    setSelection(insertedObjects, insertedObjects[0]);
+  } finally {
+    disposeGroup(previewGroup);
+  }
+  setStatus(successMessage, "ok");
+}
+
+async function addLibraryPreset(preset, displayName = preset.name) {
+  const normalized = libraryPresetFrom(preset);
+  await appendStageOpsAtRendererCenter(normalized.ops, displayName, `added "${displayName}" at renderer center`);
+}
+
+function renderLibrary() {
+  libraryPreviewObserver?.disconnect();
+  libraryPreviewQueue.length = 0;
+  libraryPreviewQueued = false;
+  generationsList.replaceChildren();
+  document.querySelectorAll("[data-library-tab]").forEach((button) => {
+    const active = button.dataset.libraryTab === libraryTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  libraryUserActions.hidden = libraryTab !== "user";
+  libraryRecentActions.hidden = true;
+  renderLibraryCategories();
+  const sources = libraryPresets.filter((item) => item.librarySource);
+  let entries = libraryPresets.filter((item) => !item.librarySource && (
+    libraryTab === "recent" ? item.kind === "recent" : item.kind === "saved" && item.origin === libraryTab
+  ));
+  if (libraryCategory === "uncategorized") entries = entries.filter((item) => item.category === null);
+  else if (libraryCategory) entries = entries.filter((item) => item.category === libraryCategory);
+  if (libraryTab === "recent") entries.sort((a, b) => b.created.localeCompare(a.created));
+  const visibleSources = libraryTab === "ai" ? sources : [];
+  for (const item of [...visibleSources, ...entries]) {
+    const preset = libraryPresetFrom(item);
+    const card = document.createElement("div");
+    const staleCount = preset.ops.filter(isEmptyPropOp).length;
+    const renderableCount = preset.ops.length - staleCount;
+    card.className = `library-card${staleCount ? " stale" : ""}`;
+    const displayName = item.librarySource ? friendlyLabel(preset.name) : preset.name;
+    const name = document.createElement("div");
+    name.className = "library-card-name";
+    name.textContent = displayName;
+    const meta = document.createElement("div");
+    meta.className = "library-card-meta";
+    const filename = item.filename || item.file;
+    const origin = item.librarySource
+      ? `generator${item.enabled === false ? " · disabled" : ""}${item.error ? ` · ${item.error}` : ""}`
+      : `${item.origin === "ai" ? "AI" : "User"} · ${item.kind}${item.category ? ` · ${libraryCategories.find((category) => category.id === item.category)?.name || "Uncategorized"}` : " · Uncategorized"}`;
+    meta.textContent = `${renderableCount} renderable op${renderableCount === 1 ? "" : "s"}${staleCount ? ` · ${staleCount} stale` : ""}${origin ? ` · ${origin}` : ""}`;
+    const generatorToggle = item.librarySource ? document.createElement("label") : null;
+    if (generatorToggle) {
+      generatorToggle.className = "library-generator-toggle";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = item.enabled === true;
+      input.title = "Enable or disable this generator in the stage";
+      input.addEventListener("change", () => setGenerationEnabled(item.name, input.checked, input));
+      generatorToggle.append(input, document.createTextNode(input.checked ? "Generator enabled" : "Generator disabled"));
+    }
+    const staleMessage = staleCount ? document.createElement("div") : null;
+    if (staleMessage) {
+      staleMessage.className = "library-stale";
+      staleMessage.textContent = `${staleCount} empty prop op${staleCount === 1 ? "" : "s"} will not render; repair or disable the source.`;
+    }
+    const preview = document.createElement("canvas");
+    preview.className = "library-preview";
+    preview.width = 320;
+    preview.height = 180;
+    const actions = document.createElement("div");
+    actions.className = "library-card-actions";
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "Add";
+    add.disabled = renderableCount === 0;
+    if (add.disabled) add.title = "This preset has no renderable ops";
+    add.addEventListener("click", () => addLibraryPreset(preset, displayName).catch((error) => setStatus(`library add failed: ${error.message}`, "error")));
+    const exportButton = document.createElement("button");
+    exportButton.type = "button";
+    exportButton.textContent = "Export";
+    exportButton.addEventListener("click", () => downloadLibraryPreset(preset));
+    actions.append(add, exportButton);
+    if (filename && item.kind === "saved") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", async () => {
+        try {
+          await postLibrary({ action: "delete", filename }, `delete ${displayName}`);
+          await loadLibrary();
+        } catch (error) { setStatus(`library delete failed: ${error.message}`, "error"); }
+      });
+      actions.append(remove);
+    }
+    card.append(name, meta);
+    if (generatorToggle) card.append(generatorToggle);
+    if (staleMessage) card.append(staleMessage);
+    card.append(preview, actions);
+    generationsList.append(card);
+    scheduleLibraryPreview(preview, preset, filename || `${item.origin || "generator"}:${item.name}:${item.updated || item.created || ""}`);
+  }
+  if (!entries.length && !visibleSources.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No matching presets.";
+    generationsList.append(empty);
+  }
+}
+
+function renderLibraryCategories() {
+  libraryCategoryList.replaceChildren();
+  const addRow = (id, label, removable = false) => {
+    const row = document.createElement("div");
+    row.className = "library-category-row";
+    const filter = document.createElement("button");
+    filter.type = "button";
+    filter.textContent = label;
+    filter.classList.toggle("active", libraryCategory === id);
+    filter.addEventListener("click", () => { libraryCategory = id; renderLibrary(); });
+    row.append(filter);
+    if (removable) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = `Delete ${label}`;
+      remove.addEventListener("click", async () => {
+        if (!confirm(`Delete category "${label}"? Its presets will become Uncategorized.`)) return;
+        try {
+          await postLibrary({ action: "category-delete", id }, `delete category ${label}`);
+          if (libraryCategory === id) libraryCategory = "";
+          await loadLibrary();
+        } catch (error) { setStatus(`category delete failed: ${error.message}`, "error"); }
+      });
+      row.append(remove);
+    }
+    libraryCategoryList.append(row);
+  };
+  addRow("", "All categories");
+  addRow("uncategorized", "Uncategorized");
+  libraryCategories.forEach((category) => addRow(category.id, category.name, true));
+  let selectedCategory = librarySaveCategory.value;
+  if (!selectedCategory) try { selectedCategory = localStorage.getItem("buildkit-library-save-category") || ""; } catch {}
+  librarySaveCategory.replaceChildren(new Option("Uncategorized", ""));
+  libraryCategories.forEach((category) => librarySaveCategory.add(new Option(category.name, category.id)));
+  if ([...librarySaveCategory.options].some((option) => option.value === selectedCategory)) librarySaveCategory.value = selectedCategory;
+}
+
+async function loadLibrary() {
+  const response = await fetch(stageRequestUrl("/library"), { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload || payload.ok !== true || !Array.isArray(payload.presets) || !Array.isArray(payload.categories)) throw new Error("invalid library response");
+  const filePresets = payload.presets.filter((item) => {
+    try { libraryPresetFrom(item); return true; } catch { return false; }
+  });
+  const generatorPresets = (Array.isArray(payload.sources) ? payload.sources : []).map((source) => ({
+    format: "buildkit-library",
+    version: 2,
+    name: source?.name,
+    ops: source?.ops,
+    origin: "ai",
+    kind: "saved",
+    category: null,
+    ...(source?.enabled !== undefined ? { enabled: source.enabled } : {}),
+    ...(source?.error ? { error: source.error } : {}),
+    librarySource: true,
+  })).filter((item) => {
+    try { libraryPresetFrom(item); return true; } catch { return false; }
+  });
+  libraryPresets = [...generatorPresets, ...filePresets];
+  libraryCategories = payload.categories.filter((category) => category && typeof category.id === "string" && typeof category.name === "string");
+  libraryFolder.textContent = payload.folder ? `Folder: ${payload.folder}` : "Library folder";
+  renderLibrary();
+}
+
+document.querySelectorAll("[data-library-tab]").forEach((button) => button.addEventListener("click", () => {
+  libraryTab = button.dataset.libraryTab;
+  renderLibrary();
+}));
+
+librarySaveCategory?.addEventListener("change", () => {
+  try { localStorage.setItem("buildkit-library-save-category", librarySaveCategory.value); } catch {}
+});
+
+libraryCategoryAdd?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = libraryCategoryName.value.trim();
+  if (!name) return libraryCategoryName.focus();
+  try {
+    const data = await postLibrary({ action: "category-create", name }, `add category ${name}`);
+    libraryCategoryName.value = "";
+    libraryCategories = Array.isArray(data.categories) ? data.categories : libraryCategories;
+    renderLibrary();
+  } catch (error) { setStatus(`category add failed: ${error.message}`, "error"); }
+});
+
+librarySaveForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = libraryNameInput.value.trim();
+  const ops = selectedLibraryOps();
+  if (!name) return setStatus("enter a preset name", "error");
+  if (!ops.length || !validStageOps(ops)) return setStatus("select one or more stage objects first", "error");
+  const category = librarySaveCategory.value || null;
+  const preset = libraryPresetFrom({ format: "buildkit-library", version: 2, name, ops, preview: libraryPreview(ops), origin: "user", kind: "saved", category });
+  const saveButton = librarySaveForm.querySelector("button[type=submit]");
+  saveButton.disabled = true;
+  try {
+    await postLibrary({ action: "save", preset, name: preset.name, ops: preset.ops, preview: preset.preview, category }, `save ${name}`);
+    libraryNameInput.value = "";
+    await loadLibrary();
+    setStatus(`saved library preset "${name}"`, "ok");
+  } catch (error) { setStatus(`library save failed: ${error.message}`, "error"); }
+  finally { saveButton.disabled = false; }
+});
+
+libraryImportButton?.addEventListener("click", () => libraryFileInput?.click());
+libraryFileInput?.addEventListener("change", async () => {
+  const file = libraryFileInput.files?.[0];
+  libraryFileInput.value = "";
+  if (!file) return;
+  try {
+    const preset = libraryPresetFrom(JSON.parse(await file.text()));
+    await postLibrary({ action: "import", preset, category: librarySaveCategory.value || preset.category }, `import ${preset.name}`);
+    await loadLibrary();
+    setStatus(`imported library preset "${preset.name}"`, "ok");
+  } catch (error) { setStatus(`library import failed: ${error.message}`, "error"); }
+});
+
+function stageArtifact(name, ops = stageOps) {
+  if (typeof name !== "string" || name.trim() === "" || !validStageOps(ops)) throw new Error("current stage is invalid");
+  return {
+    format: "buildkit-stage",
+    version: 1,
+    name: name.trim(),
+    created: new Date().toISOString(),
+    ops: clone(ops),
+  };
+}
+
+recentSaveForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = recentName.value.trim();
+  if (!name) {
+    setStatus("enter a name before saving", "error");
+    recentName.focus();
+    return;
+  }
+  if (!validStageOps(stageOps)) {
+    setStatus("current stage is invalid - refusing to save", "error");
+    return;
+  }
+  recentSaveButton.disabled = true;
+  try {
+    const data = await postStage("/generations", { action: "save", name, ops: clone(stageOps) }, "save");
+    if (!isLibraryPreset(data?.recent) || data.recent.kind !== "recent") throw new Error("malformed save response");
+    recentName.value = "";
+    await loadLibrary();
+    setStatus(`saved "${data.recent.name}"`, "ok");
+  } catch (error) {
+    setStatus(`save unavailable: ${error.message}`, "error");
+  } finally {
+    recentSaveButton.disabled = false;
+  }
+});
+
+recentExportButton.addEventListener("click", () => {
+  try {
+    const artifact = stageArtifact("buildkit-stage");
+    const blob = new Blob([JSON.stringify(artifact, null, 2)], { type: "application/json" });
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = "buildkit-stage.bkstage";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 0);
+    setStatus("downloaded buildkit-stage.bkstage", "ok");
+  } catch (error) {
+    setStatus(`export unavailable: ${error.message}`, "error");
+  }
+});
+
+async function loadGenerations() {
+  const generationRequest = fetch(stageRequestUrl("/generations"), { headers: { accept: "application/json" } }).then(async (response) => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  });
+  const libraryRequest = loadLibrary();
+  const [generationResult, libraryResult] = await Promise.allSettled([generationRequest, libraryRequest]);
+  if (generationResult.status === "fulfilled") {
+    try {
+      const payload = generationResult.value;
+      renderGenerations(generationItems(payload));
+    } catch { /* library still remains usable */ }
+  }
+  if (libraryResult.status === "rejected") showGenerationsMessage("Library unavailable");
+}
+
+function treeRow(label, meta, depth, onClick, isSelected = false, opts = {}) {
+  const row = document.createElement("div");
+  row.className = `tree-row${isSelected ? " selected" : ""}${opts.invalid ? " invalid" : ""}${opts.hit ? " tree-hit" : ""}`;
+  row.setAttribute("aria-selected", String(Boolean(isSelected)));
+  if (opts.invalid) row.setAttribute("data-invalid", "true");
+  row.style.paddingLeft = `${4 + depth * 14}px`;
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  if (opts.collapsible) {
+    // Caret click toggles the group without also selecting the row.
+    kind.classList.add("caret");
+    kind.textContent = opts.collapsed ? "▸" : "▾";
+    kind.title = opts.collapsed ? "Expand" : "Collapse";
+    kind.addEventListener("click", (event) => {
+      event.stopPropagation();
+      opts.onToggle?.();
+    });
+  } else {
+    kind.textContent = meta ? ">" : ".";
+  }
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = label;
+  if (opts.rename) name.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    startInlineRename(row, opts.rename);
+  });
+  row.append(kind, name);
+  if (meta) {
+    const detail = document.createElement("span");
+    detail.className = "meta";
+    detail.textContent = meta;
+    row.append(detail);
+  }
+  if (opts.action) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "tree-row-action";
+    action.textContent = opts.action.label;
+    action.title = opts.action.title || opts.action.label;
+    action.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      opts.action.onClick?.();
+    });
+    row.append(action);
+  }
+  if (onClick) row.addEventListener("click", onClick);
+  installStageRowDnD(row, opts);
+  explorerList.append(row);
+}
+
+function startInlineRename(row, target) {
+  if (mirrorMode || !target || row.querySelector(".inline-rename")) return;
+  const owner = generatorOwning(target.index);
+  if (owner) {
+    setStatus(`"${friendlyLabel(owner)}" builds this — click Detach before renaming`, "error");
+    return;
+  }
+  const name = row.querySelector(".name");
+  if (!name) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "name inline-rename";
+  input.value = target.value || "";
+  input.style.flex = "1 1 auto";
+  input.style.minWidth = "0";
+  input.draggable = false;
+  name.replaceWith(input);
+  let finished = false;
+  const finish = (commit) => {
+    if (finished) return;
+    finished = true;
+    const value = input.value.trim();
+    input.replaceWith(name);
+    if (!commit) return;
+    if (!value) return setStatus("name cannot be empty", "error");
+    const source = stageOps[target.index];
+    const next = source && clone(source);
+    if (!next) return setStatus("rename unavailable: stage op changed", "error");
+    const args = next.args || (next.args = {});
+    if (target.partIndex >= 0) {
+      if (args.kind !== "prop" || !Array.isArray(args.parts) || !args.parts[target.partIndex]) {
+        return setStatus("rename unavailable: stage part changed", "error");
+      }
+      args.parts[target.partIndex].name = value;
+    } else {
+      args.name = value;
+    }
+    const body = { index: target.index, patch: next };
+    if (target.partIndex >= 0) body.partIndex = target.partIndex;
+    postStage("/stage/patch", body, "rename").catch((error) => setStatus(`rename failed: ${error.message}`, "error"));
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  input.focus();
+  input.select();
+}
+
+// Collapse state is keyed by node path (mirror) or op index (stage) and lives outside
+// renderExplorer, so it survives the full re-render every stage-sync triggers.
+const collapsedKeys = new Set();
+let explorerQuery = "";
+
+explorerSearch?.addEventListener("input", () => {
+  explorerQuery = explorerSearch.value.trim().toLowerCase();
+  renderExplorer();
+});
+// Escape clears the filter without stealing the key from the viewport when unfocused.
+explorerSearch?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  event.stopPropagation();
+  explorerSearch.value = "";
+  explorerQuery = "";
+  renderExplorer();
+});
+
+function toggleCollapsed(key) {
+  if (collapsedKeys.has(key)) collapsedKeys.delete(key);
+  else collapsedKeys.add(key);
+  renderExplorer();
+}
+
+function matchesQuery(text) {
+  return !explorerQuery || String(text || "").toLowerCase().includes(explorerQuery);
+}
+function nodeMatches(node) {
+  return matchesQuery(`${node?.name || ""} ${node?.class || ""}`);
+}
+function subtreeMatches(node) {
+  if (nodeMatches(node)) return true;
+  return Array.isArray(node?.children) && node.children.some(subtreeMatches);
+}
+
+function validStagePropPartRef(source) {
+  const opIndex = Number(source?.index);
+  const partIndex = Number(source?.partIndex);
+  const op = stageOps[opIndex];
+  return Number.isInteger(opIndex) && opIndex >= 0 && op && op.args?.kind === "prop" &&
+    Array.isArray(op.args.parts) && Number.isInteger(partIndex) && partIndex >= 0 && Boolean(op.args.parts[partIndex]);
+}
+
+function applyStageResponseSnapshot(data) {
+  const sync = parseStageSync(data?.snapshot);
+  if (!sync) return false;
+  if ((data?.clientRevision !== undefined && data.clientRevision === stageClientTransformRevision) || stageSyncMatchesClientOverlay(sync)) {
+    stageClientOverlay = null;
+  }
+  if (stageMutationBusy() || draggingTransform) {
+    rememberStageSync(sync);
+    return true;
+  }
+  deferredStageSync = null;
+  return applyStageSync(sync);
+}
+
+function reparentStagePart(source, targetIndex) {
+  if (mirrorMode || !validStagePropPartRef(source)) {
+    setStatus("reparent unavailable: select a stage prop part", "error");
+    return;
+  }
+  const body = { action: targetIndex === undefined ? "ungroup" : "group", source: { index: source.index, partIndex: source.partIndex } };
+  if (targetIndex !== undefined) {
+    const target = stageOps[targetIndex];
+    if (!target || target.args?.kind !== "prop" || !Array.isArray(target.args.parts)) {
+      setStatus("reparent unavailable: drop onto a prop", "error");
+      return;
+    }
+    if (targetIndex === source.index) {
+      setStatus("reparent unavailable: choose another prop", "error");
+      return;
+    }
+    body.targetIndex = targetIndex;
+  }
+  postStage("/stage/reparent", body, body.action === "group" ? "group part" : "ungroup part")
+    .then((data) => {
+      if (data?.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid stage snapshot");
+      setStatus(body.action === "group" ? "part grouped" : "part made standalone", "ok");
+    })
+    .catch((error) => setStatus(`reparent failed: ${error.message}`, "error"));
+}
+
+function reparentSelectedParts(action) {
+  if (mirrorMode) return setStatus("grouping is available in Stage editor", "error");
+  const sources = selectedStagePartRefs();
+  if (!sources.length) return setStatus("Select stage prop parts first", "error");
+  if (action === "group" && (sources.length < 2 || new Set(sources.map((source) => source.index)).size < 2)) {
+    return setStatus("Select parts from at least two props to group", "error");
+  }
+  postStage("/stage/reparent", { action, sources }, action === "group" ? "group selection" : "ungroup selection")
+    .then((data) => {
+      if (data?.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid stage snapshot");
+      if (action === "group") {
+        const groupIndex = stageOps.length - 1;
+        if (stageOps[groupIndex]?.args?.name === "Group") selectStageOp(groupIndex);
+      }
+      setStatus(action === "group" ? `grouped ${sources.length} part(s)` : `ungrouped ${sources.length} part(s)`, "ok");
+    })
+    .catch((error) => setStatus(`${action} failed: ${error.message}`, "error"));
+}
+
+function installStageRowDnD(row, opts) {
+  if (mirrorMode) return;
+  const source = opts.drag;
+  if (source) {
+    row.draggable = true;
+    row.title = "Drag this part to another prop or Stage to make it standalone";
+    row.addEventListener("dragstart", (event) => {
+      if (!validStagePropPartRef(source)) { event.preventDefault(); return; }
+      event.dataTransfer?.setData("application/x-buildkit-stage-part", JSON.stringify(source));
+      event.dataTransfer?.setData("text/plain", JSON.stringify(source));
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragend", () => row.classList.remove("dragging"));
+  }
+  if (opts.drop) {
+    row.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes("application/x-buildkit-stage-part")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      row.classList.add("drop-active");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drop-active"));
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      row.classList.remove("drop-active");
+      let sourceData = null;
+      try { sourceData = JSON.parse(event.dataTransfer?.getData("application/x-buildkit-stage-part") || event.dataTransfer?.getData("text/plain") || "null"); } catch {}
+      if (!validStagePropPartRef(sourceData)) return setStatus("reparent unavailable: invalid dragged part", "error");
+      reparentStagePart(sourceData, opts.drop.targetIndex);
+    });
+  }
+}
+
+function renderExplorer() {
+  explorerList.replaceChildren();
+  const filtering = explorerQuery.length > 0;
+  if (mirrorMode) {
+    const parts = Array.isArray(stageDump?.parts) ? stageDump.parts : [];
+    const renderNode = (node, depth) => {
+      // While filtering, prune whole branches that contain no match.
+      if (filtering && !subtreeMatches(node)) return;
+      const path = node.fullPath || node.path;
+      const kids = Array.isArray(node.children) ? node.children : [];
+      const partIndices = mirrorPartIndicesUnder(node);
+      const isPart = kids.length === 0 && partIndices.length > 0;
+      const partIndex = isPart ? partIndices[0] : -1;
+      // A filter auto-expands, so hits are never hidden inside a collapsed group.
+      const collapsed = !filtering && collapsedKeys.has(path);
+      const dumpPart = isPart ? parts[partIndex] : null;
+      const lockMark = dumpPart?.locked ? " 🔒" : "";
+      const meta = (node.kind === "part" ? node.class : `${node.class}${node.dumpedParts !== undefined ? ` (${node.dumpedParts}/${node.totalParts})` : ""}`) + lockMark;
+      // EVERY node is clickable here, not just leaf parts — selecting a Model/group is how
+      // you copy a whole assembly back to the stage.
+      const onClick = (event) => {
+        mirrorNode = node;
+        const objects = partIndices.map((index) => findObject(index, -1)).filter(isExplorerSelectableStageObject);
+        if (event?.altKey) toggleExplorerObjectSelection(objects);
+        else setSelection(objects, objects[0]);
+      };
+      const wholeNodeSelected = partIndices.length > 0 && partIndices.every((index) => isSelectedRef(index, -1));
+      treeRow(node.name, meta, depth, onClick, wholeNodeSelected || mirrorNode === node, {
+        collapsible: kids.length > 0,
+        collapsed,
+        onToggle: () => toggleCollapsed(path),
+        hit: filtering && nodeMatches(node),
+      });
+      if (!collapsed) kids.forEach((child) => renderNode(child, depth + 1));
+    };
+    if (stageDump?.tree && typeof stageDump.tree === "object") renderNode(stageDump.tree, 0);
+    else {
+      parts.forEach((part, index) => {
+        const label = part.name || part.class || `Part ${index + 1}`;
+        if (filtering && !matchesQuery(`${label} ${part.class || ""}`)) return;
+        treeRow(label, part.class, 0, (event) => {
+          mirrorNode = part;
+          if (event?.altKey) toggleExplorerObjectSelection([findObject(index, -1)]);
+          else selectByIndex(index, -1);
+        }, isSelectedRef(index, -1), { hit: filtering });
+      });
+    }
+    if (!explorerList.childElementCount) {
+      explorerList.innerHTML = `<div class="empty">${filtering ? "No matches." : "No mirrored parts."}</div>`;
+    }
+    return;
+  }
+  // The STAGE explorer is deliberately NOT the mirror's instance tree. The mirror reflects
+  // the real place (Models/Unions/paths); the stage is a construction bench, so it groups
+  // by the GENERATOR FILE that produced each op, then op, then the primitives inside it —
+  // which is the structure you actually edit.
+  if (!stageOps.length) {
+    treeRow("Stage", "Drop here to ungroup", 0, null, false, { drop: {} });
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Nothing staged. Add a library preset or stage ops.";
+    explorerList.append(empty);
+    return;
+  }
+  treeRow("Stage", "Drop here to ungroup", 0, null, false, { drop: {} });
+  const groups = [];
+  let cursor = 0;
+  for (const generation of stageGenerations.filter((g) => g.enabled)) {
+    const count = (generation.ops || []).length;
+    groups.push({ rawName: generation.name, label: friendlyLabel(generation.name), meta: generation.error ? "error" : `${count} op${count === 1 ? "" : "s"}`, error: generation.error, start: cursor, count });
+    cursor += count;
+  }
+  if (cursor < stageOps.length) {
+    groups.push({ label: "Manual ops", meta: `${stageOps.length - cursor}`, start: cursor, count: stageOps.length - cursor });
+  }
+
+  const renderOpRow = (op, opIndex, depth) => {
+    const args = op.args || {};
+    const kids = args.kind === "prop" && Array.isArray(args.parts) ? args.parts : [];
+    const stale = isEmptyPropOp(op);
+    const owner = stale ? generatorOwning(opIndex) : null;
+    const partLabel = (part, partIndex) => `${part.name || (part.shape || "part") + " " + (partIndex + 1)}${part.locked === true ? " 🔒" : ""}`;
+    const label = `${args.name || args.kind || op.action}`;
+    // Construction-relevant meta: primitive count and the CSG budget that silently
+    // disables merging above 48.
+    const csgNote = args.csg ? ` · csg ${kids.length}/48${kids.length > 48 ? " OVER" : ""}` : "";
+    const selfHit = matchesQuery(`${label} ${op.action} ${args.kind || ""}`);
+    const kidHits = kids.filter((p, i) => matchesQuery(`${partLabel(p, i)} ${p.shape || ""}`));
+    if (filtering && !selfHit && kidHits.length === 0) return;
+    const key = `op:${opIndex}`;
+    const collapsed = !filtering && collapsedKeys.has(key);
+    treeRow(label, stale ? `stale · ${args.kind} · 0` : `${args.kind || op.action} · ${kids.length}${csgNote}`, depth, stale
+      ? () => { setSelection([]); setStatus(`"${label}" is stale: it has no parts and cannot render`, "error"); }
+      : (event) => selectStageExplorerRow(opIndex, -1, event), stale ? false : isStageOpSelected(opIndex), {
+      invalid: stale,
+      collapsible: !stale && kids.length > 0,
+      collapsed,
+      onToggle: () => toggleCollapsed(key),
+      hit: filtering && selfHit,
+      drop: args.kind === "prop" && Array.isArray(args.parts) ? { targetIndex: opIndex } : null,
+      rename: stale ? null : { index: opIndex, partIndex: -1, value: args.name || "" },
+      action: stale ? {
+        label: owner ? "Disable" : "Remove",
+        title: owner ? `Disable ${friendlyLabel(owner)} to remove its stale output` : "Remove this stale empty prop",
+        onClick: () => owner ? setGenerationEnabled(owner, false) : removeStaleStageOp(opIndex),
+      } : null,
+    });
+    if (collapsed) return;
+    kids.forEach((part, partIndex) => {
+      const text = `${partLabel(part, partIndex)} ${part.shape || ""}`;
+      if (filtering && !selfHit && !matchesQuery(text)) return;
+      treeRow(partLabel(part, partIndex), `${part.shape || "box"} · ${csgOp(part)}`, depth + 1, (event) => selectStageExplorerRow(opIndex, partIndex, event), isSelectedRef(opIndex, partIndex), {
+          hit: filtering && matchesQuery(text),
+          drag: { index: opIndex, partIndex },
+          rename: { index: opIndex, partIndex, value: part.name || "" },
+      });
+    });
+  };
+
+  for (const g of groups) {
+    const key = `grp:${g.rawName || g.label}`;
+    const collapsed = !filtering && collapsedKeys.has(key);
+    treeRow(g.label, g.meta, 0, null, false, {
+      collapsible: g.count > 0,
+      collapsed,
+      onToggle: () => toggleCollapsed(key),
+      hit: filtering && matchesQuery(g.label),
+    });
+    if (g.error) treeRow(g.error, "", 1, null, false, { hit: true });
+    if (collapsed) continue;
+    for (let i = g.start; i < g.start + g.count; i += 1) {
+      if (stageOps[i]) renderOpRow(stageOps[i], i, 1);
+    }
+  }
+  if (!explorerList.childElementCount) explorerList.innerHTML = '<div class="empty">No matches.</div>';
+  return;
+}
+
+function rgbHex(value) {
+  if (!Array.isArray(value) || value.length !== 3 || !value.every((n) => Number.isFinite(Number(n)))) return null;
+  return `#${value.map((n) => Math.max(0, Math.min(255, Math.round(Number(n)))).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function vectorFields(section, label, value, onChange) {
+  if (!Array.isArray(value) || value.length !== 3 || !value.every((n) => Number.isFinite(Number(n)))) return false;
+  const grid = document.createElement("div");
+  grid.className = "prop-grid";
+  const heading = document.createElement("label");
+  heading.textContent = label;
+  grid.append(heading);
+  ["X", "Y", "Z"].forEach((axis, index) => {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "0.1";
+    input.value = Number(value[index]).toString();
+    input.title = `${label} ${axis}`;
+    input.addEventListener("change", () => onChange(index, number(input.value)));
+    grid.append(input);
+  });
+  section.append(grid);
+  return true;
+}
+
+// Every stage mutation shares one FIFO: index-based requests must see the canonical
+// state produced by any earlier transform, reparent, delete, or promotion.
+const stageTransformJobs = [];
+let stageTransformSending = false;
+let stageMutationTail = Promise.resolve();
+let stageMutationPending = 0;
+let stageMutationVersion = 0;
+let deferredStageSync = null;
+
+function stageMutationBusy() {
+  return stageMutationPending > 0 || stageTransformSending || stageTransformJobs.length > 0;
+}
+
+function sendStage(path, body, label) {
+  return fetch(stageRequestUrl(path), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    // Keep the small edit requests alive if the user refreshes immediately after
+    // a transform; otherwise the browser can unload before the server records it.
+    keepalive: ["/stage/patch", "/stage/patches", "/stage/reparent", "/mirror/transform", "/mirror/transforms"].includes(path),
+  }).then(async (response) => {
+    let data = null;
+    try { data = await response.json(); } catch { /* fail closed on non-JSON responses */ }
+    if (!response.ok || !data || data.ok !== true) throw new Error(data?.error || `invalid ${label} response`);
+    if (path.startsWith("/stage/")) void loadHistory();
+    setStatus(`${label} accepted${path.startsWith("/stage/") ? "; waiting for stage-sync" : ""}`, "ok");
+    return data;
+  });
+}
+
+function postStage(path, body, label) {
+  setStatus(`${label}...`);
+  if (!path.startsWith("/stage/")) return sendStage(path, body, label);
+  stageMutationVersion += 1;
+  stageMutationPending += 1;
+  const request = stageMutationTail.then(() => sendStage(path, body, label));
+  stageMutationTail = request.catch(() => {});
+  return request.finally(() => {
+    stageMutationPending -= 1;
+    if (!stageMutationPending) flushDeferredStageSync();
+  });
+}
+
+function stageModelSnapshot() {
+  return { ops: clone(stageOps), generations: clone(stageGenerations) };
+}
+
+function rememberStageSync(sync) {
+  const candidate = {
+    ops: clone(sync.ops),
+    ...(sync.generations ? { generations: clone(sync.generations) } : {}),
+    ...(sync.dump !== undefined ? { dump: clone(sync.dump) } : {}),
+    ...(sync.revision === undefined ? {} : { revision: sync.revision }),
+  };
+  const currentRevision = deferredStageSync?.revision;
+  if (Number.isInteger(currentRevision) && Number.isInteger(candidate.revision) && candidate.revision < currentRevision) return;
+  deferredStageSync = candidate;
+}
+
+function stageSyncMatchesClientOverlay(sync) {
+  if (!stageClientOverlay) return true;
+  if (JSON.stringify(sync.ops) !== JSON.stringify(stageClientOverlay.ops)) return false;
+  return !sync.generations || JSON.stringify(sync.generations) === JSON.stringify(stageClientOverlay.generations);
+}
+
+function flushDeferredStageSync() {
+  if (stageMutationBusy() || draggingTransform || !deferredStageSync) return false;
+  const sync = deferredStageSync;
+  if (!stageSyncMatchesClientOverlay(sync)) return false;
+  deferredStageSync = null;
+  stageClientOverlay = null;
+  if (!applyStageSync(sync)) {
+    setStatus("invalid stage-sync - keeping last-good render", "error");
+    return false;
+  }
+  return true;
+}
+
+async function drainStageTransformQueue() {
+  if (stageTransformSending || !stageTransformJobs.length) return;
+  const job = stageTransformJobs.shift();
+  stageTransformSending = true;
+  try {
+    const data = await postStage(job.path, job.body, "transform");
+    const responseSync = parseStageSync(data?.snapshot);
+    if (responseSync) {
+      if (job.clientRevision === stageClientTransformRevision) stageClientOverlay = null;
+      rememberStageSync(responseSync);
+    }
+  } catch (error) {
+    stageTransformJobs.length = 0;
+    stageTransformSending = false;
+    deferredStageSync = null;
+    setStatus(`transform not acknowledged; local edit kept: ${error.message}`, "error");
+    return;
+  }
+  stageTransformSending = false;
+  if (stageTransformJobs.length) {
+    void drainStageTransformQueue();
+    return;
+  }
+  if (flushDeferredStageSync()) setStatus("transform synced", "ok");
+}
+
+function enqueueStageTransform(path, body, clientRevision) {
+  stageTransformJobs.push({ path, body, clientRevision });
+  setStatus("transform applied locally; syncing to server", "ok");
+  void drainStageTransformQueue();
+}
+
+function clearDragSnapshot() {
+  dragSnapshot = null;
+  dragObjectSnapshots = [];
+  dragPivot = null;
+}
+
+function restoreDragObjects() {
+  for (const snapshot of dragObjectSnapshots) {
+    snapshot.object.position.copy(snapshot.position);
+    snapshot.object.quaternion.copy(snapshot.quaternion);
+    snapshot.object.scale.copy(snapshot.scale);
+  }
+  updateSelectionHelpers();
+}
+
+function captureDragSnapshot() {
+  const items = (selectedObjects.length ? selectedObjects : selected ? [selected] : [])
+    .filter((item) => item?.object && item.object.parent);
+  if (!items.length) {
+    clearDragSnapshot();
+    return false;
+  }
+  const objects = items.map((item) => ({
+    item,
+    object: item.object,
+    position: item.object.position.clone(),
+    quaternion: item.object.quaternion.clone(),
+    scale: item.object.scale.clone(),
+  }));
+  const bounds = new THREE.Box3();
+  objects.forEach(({ object }) => bounds.expandByObject(object));
+  const primary = objects.find(({ object }) => object === selected?.object) || objects[0];
+  const stageOpsAtStart = new Map();
+  for (const { item } of objects) {
+    if (stageOps[item.opIndex] && !stageOpsAtStart.has(item.opIndex)) {
+      stageOpsAtStart.set(item.opIndex, clone(stageOps[item.opIndex]));
+    }
+  }
+  dragObjectSnapshots = objects;
+  dragPivot = bounds.isEmpty() ? primary.object.position.clone() : bounds.getCenter(new THREE.Vector3());
+  const controlObject = selectionUsesTransformProxy() ? selectionTransformProxy : primary.object;
+  dragSnapshot = {
+    mode: transform?.mode || "translate",
+    objects,
+    pivot: dragPivot.clone(),
+    controlObject,
+    controlPosition: controlObject.position.clone(),
+    controlQuaternion: controlObject.quaternion.clone(),
+    controlScale: controlObject.scale.clone(),
+    stageOps: stageOpsAtStart,
+  };
+  return true;
+}
+
+function uniformScaleFactor(current, start) {
+  const values = [current.x, current.y, current.z];
+  const bases = [start.x, start.y, start.z];
+  let factor = 1;
+  let change = 0;
+  for (let index = 0; index < 3; index += 1) {
+    const base = Math.abs(bases[index]);
+    if (base < 0.0001) continue;
+    const ratio = Math.abs(values[index]) / base;
+    if (!Number.isFinite(ratio)) continue;
+    const nextChange = Math.abs(Math.log(Math.max(ratio, 0.0001)));
+    if (nextChange > change) {
+      change = nextChange;
+      factor = ratio;
+    }
+  }
+  return Math.max(0.01, factor);
+}
+
+function scaleRatios(object, snapshot, uniform) {
+  if (uniform) {
+    const factor = uniformScaleFactor(object.scale, snapshot.scale);
+    return [factor, factor, factor];
+  }
+  return [object.scale.x, object.scale.y, object.scale.z].map((value, index) => {
+    const base = Math.max(Math.abs(snapshot.scale.getComponent(index)), 0.0001);
+    return Math.max(0.01, Math.abs(value) / base);
+  });
+}
+
+function scaledSize(value, object, snapshot, uniform) {
+  const ratios = scaleRatios(object, snapshot, uniform);
+  return vec3(value, [1, 1, 1]).map((entry, index) => Math.max(0.01, entry * ratios[index]));
+}
+
+function applyGroupTransform() {
+  const state = dragSnapshot;
+  if (!state || !state.controlObject || !selectionUsesTransformProxy()) {
+    updateSelectionHelpers();
+    return;
+  }
+  const control = state.controlObject;
+  if (state.mode === "translate") {
+    const delta = control.position.clone().sub(state.controlPosition);
+    for (const snapshot of state.objects) {
+      snapshot.object.position.copy(snapshot.position).add(delta);
+      snapshot.object.quaternion.copy(snapshot.quaternion);
+      snapshot.object.scale.copy(snapshot.scale);
+    }
+  } else if (state.mode === "rotate") {
+    const deltaQuaternion = control.quaternion.clone().multiply(state.controlQuaternion.clone().invert());
+    for (const snapshot of state.objects) {
+      snapshot.object.position.copy(snapshot.position).sub(state.pivot).applyQuaternion(deltaQuaternion).add(state.pivot);
+      snapshot.object.quaternion.copy(deltaQuaternion).multiply(snapshot.quaternion);
+      snapshot.object.scale.copy(snapshot.scale);
+    }
+  } else if (state.mode === "scale") {
+    const ratios = scaleRatios(control, { scale: state.controlScale }, state.objects.length > 1);
+    const scale = new THREE.Vector3(...ratios);
+    for (const snapshot of state.objects) {
+      snapshot.object.position.copy(snapshot.position).sub(state.pivot).multiply(scale).add(state.pivot);
+      snapshot.object.quaternion.copy(snapshot.quaternion);
+      snapshot.object.scale.copy(snapshot.scale).multiply(scale);
+    }
+  }
+  updateSelectionHelpers();
+}
+
+function patchSelection(mutator) {
+  if (!selected || !stageOps[selected.opIndex]) return;
+  const next = clone(stageOps[selected.opIndex]);
+  const args = next.args || (next.args = {});
+  const target = selected.partIndex >= 0 && args.kind === "prop" && Array.isArray(args.parts) ? args.parts[selected.partIndex] : args;
+  if (!target) return;
+  mutator(target, args);
+  const body = { index: selected.opIndex, patch: next };
+  if (selected.partIndex >= 0) body.partIndex = selected.partIndex;
+  postStage("/stage/patch", body, "patch").catch((error) => setStatus(`patch unavailable: ${error.message}`, "error"));
+}
+
+// ---- build playback --------------------------------------------------------------
+// The stage already holds every op in construction order and renders them all at once.
+// Revealing them progressively turns that into a replay of how the model gets built —
+// useful for seeing WHERE a generator goes wrong, not just that the result is wrong.
+// Purely client-side: no server round-trip, nothing re-staged.
+const buildPlayback = { timer: null, speed: 28 };
+const buildPlayButton = document.getElementById("build-play");
+const buildScrub = document.getElementById("build-scrub");
+const buildAuto = document.getElementById("build-auto");
+
+function buildSteps() {
+  return group ? group.children.length : 0;
+}
+function revealBuild(count) {
+  if (!group) return;
+  group.children.forEach((child, index) => { child.visible = index < count; });
+  if (buildScrub) {
+    buildScrub.max = String(buildSteps());
+    buildScrub.value = String(count);
+  }
+}
+function stopBuildPlayback(revealAll = false) {
+  if (buildPlayback.timer) {
+    clearInterval(buildPlayback.timer);
+    buildPlayback.timer = null;
+  }
+  if (buildPlayButton) buildPlayButton.textContent = "▶ Build";
+  if (revealAll) revealBuild(buildSteps());
+}
+function startBuildPlayback() {
+  const total = buildSteps();
+  if (!total) return;
+  const cameraView = captureCameraView();
+  stopBuildPlayback();
+  let shown = 0;
+  revealBuild(0);
+  restoreCameraView(cameraView);
+  if (buildPlayButton) buildPlayButton.textContent = "■ Stop";
+  buildPlayback.timer = setInterval(() => {
+    shown += 1;
+    revealBuild(shown);
+    setStatus(`building ${shown}/${total}`);
+    if (shown >= total) {
+      stopBuildPlayback();
+      setStatus(`build replay complete (${total} parts)`, "ok");
+    }
+  }, Math.max(16, 1000 / buildPlayback.speed));
+}
+buildPlayButton?.addEventListener("click", () => {
+  if (buildPlayback.timer) stopBuildPlayback(true);
+  else startBuildPlayback();
+});
+buildScrub?.addEventListener("input", () => {
+  stopBuildPlayback();
+  revealBuild(Number(buildScrub.value));
+});
+
+// ---- copy a mirrored instance back into the stage --------------------------------
+// Convert a dumped node (part, union, or a whole model) into build ops and append
+// them to the stage, where it can be edited, saved, or exported as .bkstage.
+const SHAPE_TO_SPEC = {
+  block: "box", ball: "ball", cylinder: "cylinder", wedge: "wedge",
+  cornerwedge: "wedge", truss: "box", mesh: "box",
+  union: "box", intersect: "box", negate: "box",
+};
+
+// Dumped rot is YXZ-ordered radians (CFrame:ToOrientation). BUILD_SPEC rot is DEGREES fed
+// to CFrame.Angles, which is XYZ-ordered — so this has to RE-DECOMPOSE through a
+// quaternion, not just convert units. Straight radToDeg here is the same class of bug that
+// made rebuilt branches point the wrong way.
+function yxzRadToXyzDeg(rot) {
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rot?.[0] || 0, rot?.[1] || 0, rot?.[2] || 0, "YXZ"));
+  const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
+  return [e.x, e.y, e.z].map((v) => Number(THREE.MathUtils.radToDeg(v).toFixed(3)));
+}
+
+function specPartFrom(source, base) {
+  const pos = source.pos || [0, 0, 0];
+  return {
+    shape: SHAPE_TO_SPEC[String(source.shape || "").toLowerCase()] || "box",
+    pos: pos.map((v, i) => Number((v - base[i]).toFixed(3))),
+    size: source.size || [1, 1, 1],
+    rot: yxzRadToXyzDeg(source.rot),
+    ...(source.color ? { color: source.color } : {}),
+    ...(source.material ? { material: source.material } : {}),
+    ...(source.transparency ? { transparency: source.transparency } : {}),
+    ...(source.locked === true ? { locked: true } : {}),
+    ...(source.op ? { op: source.op } : {}),
+  };
+}
+
+function opForDumpPart(part) {
+  const center = part.pos || [0, 0, 0];
+  let sources = null;
+  try { sources = part.csgPartsJson ? JSON.parse(part.csgPartsJson) : null; } catch { sources = null; }
+  if (Array.isArray(sources) && sources.length) {
+    // A union copies as its SOURCE parts + csg:true, so the copy rebuilds the real solid
+    // rather than the bounding box Studio reports for the baked operation.
+    return { action: "build", args: { kind: "prop", name: part.name || "Copy", center, csg: true, parts: sources.map((s) => specPartFrom(s, center)) } };
+  }
+  return { action: "build", args: { kind: "prop", name: part.name || "Copy", center, parts: [specPartFrom(part, center)] } };
+}
+
+function indexMirrorTree(tree, parts) {
+  const byPath = new Map();
+  (parts || []).forEach((part, index) => {
+    const path = part?.fullPath || part?.path;
+    if (!path) return;
+    const matches = byPath.get(path) || [];
+    matches.push(index);
+    byPath.set(path, matches);
+  });
+  const cursors = new Map();
+  const indexed = new WeakMap();
+  const visit = (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return [];
+    const children = Array.isArray(node.children) ? node.children : [];
+    const indices = [];
+    if (node.kind === "part" || children.length === 0) {
+      const path = node.fullPath || node.path;
+      const matches = byPath.get(path) || [];
+      const cursor = cursors.get(path) || 0;
+      if (cursor < matches.length) {
+        indices.push(matches[cursor]);
+        cursors.set(path, cursor + 1);
+      }
+    }
+    children.forEach((child) => indices.push(...visit(child)));
+    indexed.set(node, indices);
+    return indices;
+  };
+  if (Array.isArray(tree)) tree.forEach(visit);
+  else visit(tree);
+  return indexed;
+}
+
+function mirrorPartIndicesUnder(node) {
+  const indexed = node && mirrorTreePartIndices.get(node);
+  if (indexed) return indexed;
+  const index = stageDump?.parts?.indexOf(node);
+  return index >= 0 ? [index] : [];
+}
+
+function mirrorPartsUnder(node) {
+  return mirrorPartIndicesUnder(node).map((index) => stageDump?.parts?.[index]).filter(Boolean);
+}
+
+// ---- mirror: copy the current multi-selection into the stage -----------------------
+// Multi-select already works here (marquee + ctrl-click feed selectedObjects, which is
+// what /mirror/transform batches). Copying that same selection into the stage is how you
+// take something built in Studio and hand-edit it as a prop.
+function copyMirrorSelectionToStage() {
+  const parts = [];
+  const seen = new Set();
+  for (const object of selectedObjects.length ? selectedObjects : (selected ? [selected.object] : [])) {
+    const index = object?.userData?.selection?.opIndex;
+    const part = Number.isInteger(index) ? stageDump?.parts?.[index] : null;
+    const key = part && (part.fullPath || part.path || part.name);
+    if (part && key && !seen.has(key)) { seen.add(key); parts.push(part); }
+  }
+  if (!parts.length) {
+    // fall back to whatever is highlighted in the Explorer (covers Models/groups, which
+    // have no mesh of their own to click in the viewport)
+    if (mirrorNode) return copyMirrorNodeToStage(mirrorNode);
+    return setStatus("Select parts in the viewport or a node in the Explorer first");
+  }
+  const ops = parts.map(opForDumpPart);
+  appendStageOpsAtRendererCenter(ops, `${ops.length} selected`, `copied ${ops.length} instance(s) into the stage`)
+    .catch((error) => setStatus(`copy failed: ${error.message}`, "error"));
+}
+document.getElementById("mirror-copy")?.addEventListener("click", copyMirrorSelectionToStage);
+
+function copyMirrorNodeToStage(node) {
+  const parts = mirrorPartsUnder(node);
+  if (!parts.length) {
+    setStatus(`${node.name}: nothing to copy`, "error");
+    return;
+  }
+  const ops = parts.map(opForDumpPart);
+  appendStageOpsAtRendererCenter(ops, node.name, `copied ${ops.length} op(s) from ${node.name} into the stage`)
+    .catch((error) => setStatus(`copy failed: ${error.message}`, "error"));
+}
+
+function renderProperties() {
+  if (mirrorMode) return;
+  propertyContent.replaceChildren();
+  if (!selected || !stageOps[selected.opIndex]) {
+    propertyContent.innerHTML = '<div class="empty">Select an op or part.</div>';
+    return;
+  }
+  if (selectedObjects.length > 1) {
+    renderSelectionSummary(propertyContent, "Use Move, Rotate, or Scale to transform the whole selection. Individual property fields are hidden to avoid editing only the primary part.");
+    return;
+  }
+  const op = stageOps[selected.opIndex];
+  const args = op.args || {};
+  const target = selected.partIndex >= 0 && args.kind === "prop" && Array.isArray(args.parts) ? args.parts[selected.partIndex] : args;
+  if (!target) return;
+  const title = document.createElement("div");
+  title.className = "prop-section";
+  const heading = document.createElement("div");
+  heading.className = "prop-heading";
+  heading.textContent = selected.partIndex >= 0 ? "Part" : "Operation";
+  title.append(heading, document.createTextNode(target.name || args.name || args.kind || op.action));
+  propertyContent.append(title);
+
+  const transformSection = document.createElement("div");
+  transformSection.className = "prop-section";
+  transformSection.innerHTML = '<div class="prop-heading">Transform</div>';
+  let shown = false;
+  const positionKey = selected.partIndex >= 0 ? "pos" : "center";
+  shown = vectorFields(transformSection, selected.partIndex >= 0 ? "Local" : "Pos", target[positionKey], (index, value) => patchSelection((part, root) => {
+    const owner = selected.partIndex >= 0 ? part : root;
+    const vector = vec3(owner[positionKey]);
+    vector[index] = value;
+    owner[positionKey] = vector;
+  })) || shown;
+  shown = vectorFields(transformSection, "Size", target.size || (selected.partIndex < 0 ? args.size : undefined), (index, value) => patchSelection((part, root) => {
+    const owner = part.size ? part : root;
+    const vector = vec3(owner.size);
+    vector[index] = Math.max(0.01, value);
+    owner.size = vector;
+  })) || shown;
+  shown = vectorFields(transformSection, "Rot", target.rot || (selected.partIndex < 0 ? args.rot : undefined), (index, value) => patchSelection((part, root) => {
+    const owner = part.rot ? part : root;
+    const vector = vec3(owner.rot);
+    vector[index] = value;
+    owner.rot = vector;
+  })) || shown;
+  if (!shown) transformSection.insertAdjacentHTML("beforeend", '<div class="hint">No transform fields in this op.</div>');
+  propertyContent.append(transformSection);
+
+  const appearance = document.createElement("div");
+  appearance.className = "prop-section";
+  appearance.innerHTML = '<div class="prop-heading">Appearance</div>';
+  let appearanceShown = false;
+  const color = rgbHex(target.color || (selected.partIndex < 0 ? args.color : undefined));
+  if (color) {
+    const label = document.createElement("label");
+    label.textContent = "Color";
+    const input = document.createElement("input");
+    input.type = "color";
+    input.value = color;
+    input.addEventListener("change", () => patchSelection((part, root) => {
+      const hex = input.value.slice(1);
+      (selected.partIndex >= 0 ? part : root).color = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+    }));
+    appearance.append(label, input);
+    appearanceShown = true;
+  }
+  const materialValue = target.material || (selected.partIndex < 0 ? args.material : undefined);
+  if (typeof materialValue === "string") {
+    const label = document.createElement("label");
+    label.textContent = "Material";
+    const input = document.createElement("input");
+    input.className = "wide";
+    input.value = materialValue;
+    input.placeholder = "Roblox material";
+    input.addEventListener("change", () => patchSelection((part, root) => { (selected.partIndex >= 0 ? part : root).material = input.value.trim(); }));
+    appearance.append(label, input);
+    appearanceShown = true;
+  }
+  if (selected.partIndex >= 0 && (args.csg || target.op || target.negate)) {
+    const label = document.createElement("label");
+    label.textContent = "CSG op";
+    const select = document.createElement("select");
+    ["union", "subtract", "intersect"].forEach((value) => select.add(new Option(value, value, value === csgOp(target), value === csgOp(target))));
+    select.addEventListener("change", () => patchSelection((part) => { part.op = select.value; delete part.negate; }));
+    appearance.append(label, select);
+    appearanceShown = true;
+  }
+  if (appearanceShown) propertyContent.append(appearance);
+  const hint = document.createElement("div");
+  hint.className = "prop-section hint";
+  hint.textContent = "Edits are sent to the server and applied after stage-sync.";
+  propertyContent.append(hint);
+}
+
+function updateCsgLabel() {
+  // Report the WORST single op, not the sum: the cap is per-prop, so totalling every
+  // staged prop would cry over budget while each individual union is fine.
+  const worst = stageOps.reduce((max, op) => Math.max(max, op.args?.csg && Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0);
+  if (csgModeSelect) csgModeSelect.value = csgMode;
+  csgLimit.textContent = worst > stageCsgMax
+    ? `CSG max ${stageCsgMax} — largest prop has ${worst}, it will NOT merge`
+    : `CSG max ${stageCsgMax} parts (largest prop: ${worst})`;
+  csgLimit.classList.toggle("limit", worst > stageCsgMax);
+}
+
+function applyStageSync(sync) {
+  if (Number.isInteger(sync.revision) && sync.revision < lastStageRevision) return true;
+  if (Number.isInteger(sync.revision)) lastStageRevision = sync.revision;
+  const previousOps = stageOps;
+  const previousDump = stageDump;
+  const previousGenerations = stageGenerations;
+  stageOps = clone(sync.ops);
+  if (sync.dump !== undefined) stageDump = sync.dump;
+  if (sync.generations !== undefined) stageGenerations = Array.isArray(sync.generations) ? sync.generations : [];
+  if (!replaceStage(stageOps, previousOps)) {
+    stageOps = previousOps;
+    stageDump = previousDump;
+    stageGenerations = previousGenerations;
+    return false;
+  }
+  if (sync.generations !== undefined) renderGenerations(stageGenerations);
+  updateCsgLabel();
+  renderExplorer();
+  renderProperties();
+  markSynced();
+  void loadHistory();
+  return true;
+}
+
+function frameSelection() {
+  if (!selected?.object) return setStatus("Select an object to frame");
+  const box = selectionBounds();
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const distance = Math.max(size.x, size.y, size.z, 1) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) * 1.6;
+  const direction = camera.position.clone().sub(controls.target).normalize();
+  camera.position.copy(center).add(direction.multiplyScalar(distance));
+  controls.target.copy(center);
+  controls.update();
+}
+
+function stageEuler(object) {
+  const euler = new THREE.Euler().setFromQuaternion(object.quaternion, "YXZ");
+  return yxzRadToXyzDeg([euler.x, euler.y, euler.z]);
+}
+
+function applyCsgTransform(next, source, snapshot, uniform) {
+  const sourceParts = source.args?.parts;
+  if (!Array.isArray(sourceParts) || !Array.isArray(next.args?.parts)) return false;
+  const ratios = scaleRatios(snapshot.object, snapshot, uniform);
+  const initialQuaternion = snapshot.quaternion.clone();
+  const initialScale = snapshot.scale.clone();
+  const finalQuaternion = snapshot.object.quaternion.clone();
+  const finalScale = snapshot.object.scale.clone();
+  const transformPoint = (point) => point
+    .sub(snapshot.position)
+    .applyQuaternion(initialQuaternion.clone().invert())
+    .divide(initialScale)
+    .multiply(finalScale)
+    .applyQuaternion(finalQuaternion)
+    .add(snapshot.object.position);
+  const baseCenter = new THREE.Vector3(...vec3(source.args.center));
+  const nextCenter = transformPoint(baseCenter.clone());
+  const deltaQuaternion = finalQuaternion.clone().multiply(initialQuaternion.clone().invert());
+  next.args.center = nextCenter.toArray();
+  for (let index = 0; index < sourceParts.length; index += 1) {
+    const sourcePart = sourceParts[index];
+    const target = next.args.parts[index];
+    if (!target) return false;
+    const sourceWorldPosition = baseCenter.clone().add(new THREE.Vector3(...vec3(sourcePart.pos)));
+    target.pos = transformPoint(sourceWorldPosition).sub(nextCenter).toArray();
+    const sourceQuaternion = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(...xyzDegToYxzRad(sourcePart.rot), "YXZ")
+    );
+    target.rot = stageEuler({ quaternion: deltaQuaternion.clone().multiply(sourceQuaternion) });
+    if (Array.isArray(sourcePart.size)) target.size = sourcePart.size.map((entry, axis) => Math.max(0.01, Number(entry) * ratios[axis]));
+  }
+  delete next.args.rot;
+  delete next.args.size;
+  return true;
+}
+
+function buildStageTransformPatches() {
+  const state = dragSnapshot;
+  if (!state) return null;
+  const uniform = state.mode === "scale" && state.objects.length > 1;
+  const patches = new Map();
+  for (const snapshot of state.objects) {
+    const item = snapshot.item;
+    const source = state.stageOps.get(item.opIndex);
+    if (!source) return null;
+    let entry = patches.get(item.opIndex);
+    if (!entry) {
+      entry = { index: item.opIndex, patch: clone(source) };
+      patches.set(item.opIndex, entry);
+    }
+    const next = entry.patch;
+    const args = next.args || (next.args = {});
+    const position = [snapshot.object.position.x, snapshot.object.position.y, snapshot.object.position.z];
+    if (item.partIndex >= 0) {
+      if (args.kind !== "prop" || !Array.isArray(args.parts) || !args.parts[item.partIndex]) return null;
+      const target = args.parts[item.partIndex];
+      const center = vec3(args.center);
+      target.pos = position.map((value, index) => value - center[index]);
+      target.rot = stageEuler(snapshot.object);
+      if (state.mode === "scale" && Array.isArray(target.size)) target.size = scaledSize(target.size, snapshot.object, snapshot, uniform);
+    } else {
+      if (!Array.isArray(args.center)) return null;
+      if (source.args?.kind === "prop" && Array.isArray(source.args.parts) && snapshot.object.userData.csgPreview) {
+        if (!applyCsgTransform(next, source, snapshot, uniform)) return null;
+      } else {
+        args.center = position;
+        args.rot = stageEuler(snapshot.object);
+        if (state.mode === "scale" && Array.isArray(args.size)) args.size = scaledSize(args.size, snapshot.object, snapshot, uniform);
+      }
+    }
+  }
+  return [...patches.values()];
+}
+
+function applyOptimisticStagePatches(patches) {
+  const enabledGenerations = stageGenerations.filter((generation) => generation.enabled);
+  const entries = [];
+  const generatedEntries = new Map();
+  let generatedCount = 0;
+  for (const generation of enabledGenerations) {
+    const ownerEntries = generation.ops.map((op) => ({ owner: generation.name, working: clone(op) }));
+    generatedEntries.set(generation.name, ownerEntries);
+    entries.push(...ownerEntries);
+    generatedCount += ownerEntries.length;
+  }
+  if (stageOps.length < generatedCount) return false;
+  const manualEntries = stageOps.slice(generatedCount).map((op) => ({ owner: null, working: clone(op) }));
+  entries.push(...manualEntries);
+
+  const promotedOwners = new Set();
+  for (const change of patches) {
+    const entry = entries[change.index];
+    if (!entry || !isStageOp(change.patch)) return false;
+    entry.working = clone(change.patch);
+    if (entry.owner !== null) promotedOwners.add(entry.owner);
+  }
+
+  const nextOps = [];
+  for (const generation of enabledGenerations) {
+    if (!promotedOwners.has(generation.name)) {
+      nextOps.push(...generation.ops.map((op) => clone(op)));
+    }
+  }
+  for (const generation of enabledGenerations) {
+    if (!promotedOwners.has(generation.name)) continue;
+    for (const entry of generatedEntries.get(generation.name) || []) {
+      if (entry.working) nextOps.push(entry.working);
+    }
+  }
+  nextOps.push(...manualEntries.filter((entry) => entry.working).map((entry) => entry.working));
+  if (!validStageOps(nextOps)) return false;
+
+  if (!promotedOwners.size) {
+    stageOps = clone(nextOps);
+    updateSelectionHelpers();
+    renderExplorer();
+    renderProperties();
+    updateCsgLabel();
+    return true;
+  }
+
+  const previousOps = stageOps;
+  const previousGenerations = stageGenerations;
+  stageOps = clone(nextOps);
+  stageGenerations = stageGenerations.map((generation) => promotedOwners.has(generation.name)
+    ? { ...generation, enabled: false }
+    : generation);
+  if (!replaceStage(stageOps, previousOps)) {
+    stageOps = previousOps;
+    stageGenerations = previousGenerations;
+    return false;
+  }
+  renderGenerations(stageGenerations);
+  renderExplorer();
+  renderProperties();
+  updateCsgLabel();
+  return true;
+}
+
+function commitTransform() {
+  const state = dragSnapshot;
+  if (!state || !state.objects.length) return;
+  const patches = buildStageTransformPatches();
+  if (!patches) {
+    restoreDragObjects();
+    clearDragSnapshot();
+    attachSelectionTransform();
+    setStatus("transform unavailable: selected object cannot be staged", "error");
+    return;
+  }
+  const clientRevision = ++stageClientTransformRevision;
+  const single = state.objects.length === 1;
+  const item = state.objects[0]?.item;
+  const body = single
+    ? { ...patches[0], ...(item?.partIndex >= 0 ? { partIndex: item.partIndex } : {}), clientRevision }
+    : { patches, clientRevision };
+  const path = single ? "/stage/patch" : "/stage/patches";
+  if (!applyOptimisticStagePatches(patches)) {
+    restoreDragObjects();
+    clearDragSnapshot();
+    attachSelectionTransform();
+    setStatus("transform unavailable: local stage update failed", "error");
+    flushDeferredStageSync();
+    return;
+  }
+  stageClientOverlay = stageModelSnapshot();
+  clearDragSnapshot();
+  attachSelectionTransform();
+  enqueueStageTransform(path, body, clientRevision);
+}
+
+function customizeLinearGizmo(helper) {
+  const gizmo = helper?.children?.find((child) => child.isTransformControlsGizmo);
+  if (!gizmo) return;
+  const materials = {
+    X: new THREE.MeshBasicMaterial({ color: 0xff0000, depthTest: false, depthWrite: false, transparent: true, toneMapped: false }),
+    Y: new THREE.MeshBasicMaterial({ color: 0x00ff00, depthTest: false, depthWrite: false, transparent: true, toneMapped: false }),
+    Z: new THREE.MeshBasicMaterial({ color: 0x0000ff, depthTest: false, depthWrite: false, transparent: true, toneMapped: false }),
+  };
+  const dispose = (object) => object.traverse((child) => {
+    child.geometry?.dispose();
+    if (Array.isArray(child.material)) child.material.forEach((material) => material.dispose());
+    else child.material?.dispose();
+  });
+  const replace = (mode) => {
+    const visible = gizmo.gizmo?.[mode];
+    if (!visible) return;
+    [...visible.children].forEach((child) => { visible.remove(child); dispose(child); });
+    const axes = { X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] };
+    for (const [axis, direction] of Object.entries(axes)) {
+      const material = materials[axis];
+      for (const sign of [-1, 1]) {
+        const geometry = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+        geometry.translate(direction[0] * 0.5 * sign, direction[1] * 0.5 * sign, direction[2] * 0.5 * sign);
+        const cube = new THREE.Mesh(geometry, material);
+        cube.name = axis;
+        visible.add(cube);
+      }
+      const points = [
+        new THREE.Vector3(-direction[0] * 0.5, -direction[1] * 0.5, -direction[2] * 0.5),
+        new THREE.Vector3(direction[0] * 0.5, direction[1] * 0.5, direction[2] * 0.5),
+      ];
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: material.color, depthTest: false, depthWrite: false, transparent: true, toneMapped: false }));
+      line.name = axis;
+      visible.add(line);
+    }
+    const center = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, depthWrite: false, transparent: true, toneMapped: false }));
+    center.name = "XYZ";
+    visible.add(center);
+  };
+  // Keep TransformControls' native arrow handles for Move. Scale retains the
+  // intentionally plane-free cube-and-line presentation above.
+  replace("scale");
+}
+
+async function forceSync() {
+  if (forceSyncButton) forceSyncButton.disabled = true;
+  setStatus("forcing sync...");
+  try {
+    if (mirrorMode) {
+      const response = await fetch(`./scene.json?sync=${Date.now()}`, { headers: { accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(`mirror snapshot HTTP ${response.status}`);
+      const dump = await response.json();
+      if (!isDump(dump)) throw new Error("invalid mirror snapshot");
+      if (!acceptMirrorDump(dump)) throw new Error("mirror snapshot is older than the current client state");
+      markSynced();
+    } else {
+      if (stageMutationBusy() || draggingTransform) throw new Error("finish pending stage changes first");
+      const syncVersion = stageMutationVersion;
+      const response = await fetch(stageRequestUrl(`/stage/snapshot?sync=${Date.now()}`), { headers: { accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(`stage snapshot HTTP ${response.status}`);
+      const payload = await response.json();
+      const sync = parseStageSync(payload?.snapshot);
+      if (!sync) throw new Error("invalid stage snapshot");
+      if (syncVersion !== stageMutationVersion || stageMutationBusy() || draggingTransform) {
+        throw new Error("stage changed while refreshing; retry sync");
+      }
+      if (!stageSyncMatchesClientOverlay(sync)) throw new Error("client transform is newer than this stage snapshot");
+      deferredStageSync = null;
+      if (!applyStageSync(sync)) throw new Error("invalid stage snapshot");
+    }
+    await loadGenerations();
+    setStatus(mirrorMode ? mirrorStatusText(stageDump, "mirror force-synced") : "stage force-synced", mirrorMode && stageDump?.coverage !== "complete" ? "error" : "ok");
+  } catch (error) {
+    setStatus(`force sync failed: ${error.message}`, "error");
+  } finally {
+    if (forceSyncButton) forceSyncButton.disabled = false;
+  }
+}
+
+function loadOptionalDump() {
+  fetch(`./scene.json?initial=${Date.now()}`, { headers: { accept: "application/json" }, cache: "no-store" }).then(async (response) => {
+    if (!response.ok) return;
+    const dump = await response.json();
+    if (isDump(dump)) {
+      if (mirrorMode) { acceptMirrorDump(dump); markSynced(); }
+      else { stageDump = dump; renderExplorer(); }
+    }
+  }).catch(() => {});
+}
+
+if (!mirrorMode) try {
+  const module = await import("three/addons/controls/TransformControls.js");
+  if (module.TransformControls) {
+    transform = new module.TransformControls(camera, renderer.domElement);
+    const helper = transform.getHelper();
+    scene.add(helper);
+    customizeLinearGizmo(helper);
+    transform.setSize(0.8);
+    setTransformMode("translate");
+    transform.addEventListener("change", applyGroupTransform);
+    transform.addEventListener("dragging-changed", (event) => {
+      controls.enabled = !event.value;
+      draggingTransform = event.value;
+      if (event.value) {
+        captureDragSnapshot();
+      }
+      else if (dragSnapshot) {
+        suppressClick = true;
+        commitTransform();
+        setTimeout(() => { suppressClick = false; }, 0);
+      }
+    });
+    attachSelectionTransform();
+  }
+} catch (error) {
+  setStatus(`gizmo unavailable: ${error.message}`, "error");
+}
+
+document.getElementById("undo").addEventListener("click", () => moveHistory("/stage/undo", "undo").catch((error) => setStatus(`undo unavailable: ${error.message}`, "error")));
+document.getElementById("redo").addEventListener("click", () => moveHistory("/stage/redo", "redo").catch((error) => setStatus(`redo unavailable: ${error.message}`, "error")));
+document.getElementById("commit").addEventListener("click", () => postStage("/stage/commit", undefined, "port").catch((error) => setStatus(`port unavailable: ${error.message}`, "error")));
+// Which enabled generator file (if any) owns a given stage op index. Ops from a file are
+// not editable — the file regenerates them — so the UI has to say so and offer detach
+// rather than surfacing the raw "not a manual op" error.
+function generatorOwning(opIndex) {
+  let cursor = 0;
+  for (const generation of stageGenerations.filter((g) => g.enabled)) {
+    const count = (generation.ops || []).length;
+    if (opIndex >= cursor && opIndex < cursor + count) return generation.name;
+    cursor += count;
+  }
+  return null;
+}
+
+function detachGenerator(name) {
+  const displayName = friendlyLabel(name);
+  return postStage("/stage/detach", { name }, `detach ${displayName}`)
+    .then((data) => setStatus(`${displayName} detached (${data.ops} ops now editable)`, "ok"))
+    .catch((error) => setStatus(`detach failed: ${error.message}`, "error"));
+}
+
+function deleteStageSelection() {
+  const items = selectedObjects.length ? selectedObjects : (selected ? [selected] : []);
+  if (!items.length) return setStatus("Select an object to delete");
+  const refs = items.map(({ opIndex, partIndex }) => ({ opIndex, partIndex }));
+  const owners = [...new Set(refs.map((ref) => generatorOwning(ref.opIndex)).filter(Boolean))];
+  if (owners.length) {
+    const owner = owners[0];
+    setStatus(`"${friendlyLabel(owner)}" builds this — edit the file, or click Detach to take it over here`, "error");
+    return;
+  }
+  const patches = deletePatchesForSelection(stageOps, refs);
+  if (!patches.length) return setStatus("Delete unavailable: selected stage object changed", "error");
+  const path = patches.length === 1 ? "/stage/patch" : "/stage/patches";
+  const body = patches.length === 1 ? patches[0] : { patches };
+  postStage(path, body, "delete").catch((error) => setStatus(`delete unavailable: ${error.message}`, "error"));
+}
+document.getElementById("delete").addEventListener("click", deleteStageSelection);
+
+function toggleStageSelectionLock() {
+  if (mirrorMode) return;
+  const patches = lockPatchesForSelection(stageOps, selectedObjects);
+  if (!patches.length) return setStatus("Select an object to lock");
+  const locked = lockPatchValue(patches[0]);
+  const path = patches.length === 1 ? "/stage/patch" : "/stage/patches";
+  const body = patches.length === 1 ? patches[0] : { patches };
+  postStage(path, body, locked ? "lock" : "unlock")
+    .then(() => setStatus(`${patches.length} ${patches.length === 1 ? "item" : "items"} ${locked ? "locked" : "unlocked"}`, "ok"))
+    .catch((error) => setStatus(`lock unavailable: ${error.message}`, "error"));
+}
+lockButton?.addEventListener("click", toggleStageSelectionLock);
+
+document.getElementById("detach")?.addEventListener("click", () => {
+  const owner = selected ? generatorOwning(selected.opIndex) : null;
+  if (!owner) return setStatus("Select something built by a generator file first");
+  detachGenerator(owner);
+});
+
+// ---- stage clipboard (copy / paste / duplicate) ----------------------------------
+// Stage is a construction playground, so duplicating a prop or a single primitive should
+// be as cheap as in any editor. Paste appends through the same validated /stage/append
+// the mirror's copy uses, offset slightly so the copy isn't hidden inside the original.
+let stageClipboard = null;
+
+function copyStageSelection() {
+  if (mirrorMode) return;
+  if (!selected || !stageOps[selected.opIndex]) return setStatus("Select something to copy");
+  const op = clone(stageOps[selected.opIndex]);
+  const args = op.args || {};
+  if (selected.partIndex >= 0 && args.kind === "prop" && Array.isArray(args.parts) && args.parts[selected.partIndex]) {
+    // a single primitive becomes a prop of its own
+    stageClipboard = {
+      action: "build",
+      args: { kind: "prop", name: `${args.name || "Prop"}Part`, center: args.center || [0, 0, 0], ...(args.csg ? { csg: true } : {}), parts: [clone(args.parts[selected.partIndex])] },
+    };
+    setStatus("copied part", "ok");
+  } else {
+    stageClipboard = op;
+    setStatus(`copied ${args.name || args.kind || op.action}`, "ok");
+  }
+}
+
+function pasteStageClipboard() {
+  if (mirrorMode) return;
+  if (!stageClipboard) return setStatus("Clipboard is empty");
+  const op = clone(stageClipboard);
+  op.args = op.args || {};
+  const c = op.args.center || [0, 0, 0];
+  op.args.center = [c[0] + 2, c[1], c[2] + 2];
+  op.args.name = `${op.args.name || "Copy"} copy`;
+  postStage("/stage/append", { ops: [op] }, "paste")
+    .then(() => setStatus(`pasted ${op.args.name}`, "ok"))
+    .catch((error) => setStatus(`paste failed: ${error.message}`, "error"));
+}
+document.getElementById("frame").addEventListener("click", frameSelection);
+transformButtons.translate?.addEventListener("click", () => setTransformMode("translate"));
+transformButtons.rotate?.addEventListener("click", () => setTransformMode("rotate"));
+transformButtons.scale?.addEventListener("click", () => setTransformMode("scale"));
+groupButton?.addEventListener("click", () => reparentSelectedParts("group"));
+ungroupButton?.addEventListener("click", () => reparentSelectedParts("ungroup"));
+forceSyncButton?.addEventListener("click", forceSync);
+csgModeSelect?.addEventListener("change", () => {
+  const oldMode = csgMode;
+  csgMode = csgModeSelect.value === "preview" ? "preview" : "edit";
+  if (!replaceStage(stageOps)) {
+    csgMode = oldMode;
+    updateCsgLabel();
+    setStatus("CSG mode failed; keeping last-good render", "error");
+    return;
+  }
+  try { localStorage.setItem("buildkit-csg-mode", csgMode); } catch {}
+  updateCsgLabel();
+});
+
+const raycaster = new THREE.Raycaster();
+function selectAt(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  raycaster.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), camera);
+  const hit = raycaster.intersectObjects(group.children, true)
+    .map((entry) => selectionTargetForHit(entry))
+    .find((target) => isSelectableStageObject(target));
+  if (hit) {
+    const ref = hit.userData.selection;
+    if (!mirrorMode && ref.partIndex >= 0 && stageOps[ref.opIndex]?.args?.kind === "prop") selectStageOp(ref.opIndex);
+    else selectByIndex(ref.opIndex, ref.partIndex);
+  } else {
+    setSelection([]);
+  }
+}
+
+function marqueeBounds(drag) {
+  return {
+    left: Math.min(drag.startX, drag.currentX),
+    right: Math.max(drag.startX, drag.currentX),
+    top: Math.min(drag.startY, drag.currentY),
+    bottom: Math.max(drag.startY, drag.currentY),
+  };
+}
+
+function updateMarquee() {
+  if (!marqueeDrag) return;
+  const bounds = marqueeBounds(marqueeDrag);
+  selectionMarquee.style.display = "block";
+  selectionMarquee.style.left = `${bounds.left}px`;
+  selectionMarquee.style.top = `${bounds.top}px`;
+  selectionMarquee.style.width = `${bounds.right - bounds.left}px`;
+  selectionMarquee.style.height = `${bounds.bottom - bounds.top}px`;
+}
+
+function hideMarquee() {
+  selectionMarquee.style.display = "none";
+}
+
+function screenBoundsIntersect(object, wanted, viewport) {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) return false;
+  const { min, max } = box;
+  const corners = [
+    new THREE.Vector3(min.x, min.y, min.z), new THREE.Vector3(min.x, min.y, max.z),
+    new THREE.Vector3(min.x, max.y, min.z), new THREE.Vector3(min.x, max.y, max.z),
+    new THREE.Vector3(max.x, min.y, min.z), new THREE.Vector3(max.x, min.y, max.z),
+    new THREE.Vector3(max.x, max.y, min.z), new THREE.Vector3(max.x, max.y, max.z),
+  ];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const corner of corners) {
+    corner.project(camera);
+    if (corner.z < -1 || corner.z > 1) continue;
+    const x = viewport.left + (corner.x + 1) * viewport.width / 2;
+    const y = viewport.top + (1 - corner.y) * viewport.height / 2;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return minX !== Infinity && maxX >= wanted.left && minX <= wanted.right && maxY >= wanted.top && minY <= wanted.bottom;
+}
+
+function addSmartSelectGroup(groups, key, members, locked = false) {
+  if (!key || locked) return;
+  const selectable = [...new Set(members)].filter(isSelectableStageObject);
+  if (selectable.length < 2) return;
+  const existing = groups.get(key);
+  if (existing) {
+    existing.members = [...new Set([...existing.members, ...selectable])];
+  } else {
+    groups.set(key, { members: selectable });
+  }
+}
+
+function mirrorSmartSelectGroups(objects) {
+  const byIndex = new Map(objects.map((object) => [object.userData.selection?.opIndex, object]));
+  const groups = new Map();
+  const tree = stageDump?.tree;
+  const treeRootPath = tree && !Array.isArray(tree) ? (tree.fullPath || tree.path) : null;
+  const visit = (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    const path = node.fullPath || node.path;
+    const children = Array.isArray(node.children) ? node.children : [];
+    const indices = mirrorPartIndicesUnder(node);
+    const workspaceRoot = node.class === "Workspace" && !node.parentPath;
+    if (path && !workspaceRoot && node.kind !== "part" && children.length > 0) {
+      addSmartSelectGroup(groups, `mirror:${path}`, indices.map((index) => byIndex.get(index)).filter(Boolean), node.locked === true);
+    }
+    children.forEach(visit);
+  };
+  if (Array.isArray(tree)) tree.forEach(visit);
+  else if (tree) visit(tree);
+
+  // Region/legacy snapshots can omit the tree. Parent paths are the same stable
+  // hierarchy identity and keep separate scene groups from being merged by name.
+  const parentGroups = new Map();
+  for (const object of objects) {
+    const index = object.userData.selection?.opIndex;
+    const part = Number.isInteger(index) ? stageDump?.parts?.[index] : null;
+    const fullPath = object.userData.fullPath || object.userData.path || part?.fullPath || part?.path;
+    const parentPath = object.userData.parentPath || part?.parentPath || (typeof fullPath === "string" ? fullPath.slice(0, fullPath.lastIndexOf(".")) : "");
+    if (!parentPath || parentPath === treeRootPath || !parentPath.includes(".")) continue;
+    const members = parentGroups.get(parentPath) || [];
+    members.push(object);
+    parentGroups.set(parentPath, members);
+  }
+  for (const [path, members] of parentGroups) addSmartSelectGroup(groups, `mirror:${path}`, members);
+  return [...groups.values()];
+}
+
+function smartSelectGroups(objects) {
+  if (mirrorMode) return mirrorSmartSelectGroups(objects);
+  const groups = new Map();
+  for (const object of objects) {
+    const opIndex = object.userData.selection?.opIndex;
+    if (Number.isInteger(opIndex)) {
+      const members = groups.get(`stage:${opIndex}`) || [];
+      members.push(object);
+      groups.set(`stage:${opIndex}`, members);
+    }
+  }
+  return [...groups.values()].map((members) => ({ members }));
+}
+
+function smartSelectMarqueeObjects(objects) {
+  if (!smartSelectEnabled || !objects.length) return objects;
+  const selected = new Set(objects);
+  const expanded = new Set(objects);
+  for (const group of smartSelectGroups(selectableStageObjects())) {
+    const hitCount = group.members.reduce((count, object) => count + (selected.has(object) ? 1 : 0), 0);
+    if (hitCount / group.members.length >= SMART_SELECT_THRESHOLD) {
+      group.members.forEach((object) => expanded.add(object));
+    }
+  }
+  return selectableStageObjects().filter((object) => expanded.has(object));
+}
+
+function selectMarquee(drag) {
+  const viewport = renderer.domElement.getBoundingClientRect();
+  const wanted = marqueeBounds(drag);
+  const objects = selectableStageObjects().filter((object) => screenBoundsIntersect(object, wanted, viewport));
+  const selectedObjectsForMarquee = smartSelectMarqueeObjects(objects);
+  setSelection(selectedObjectsForMarquee, objects[0]);
+}
+
+function finishMarquee(event, cancelled = false) {
+  if (!marqueeDrag || marqueeDrag.pointerId !== event.pointerId) return false;
+  const drag = marqueeDrag;
+  marqueeDrag = null;
+  hideMarquee();
+  if (renderer.domElement.hasPointerCapture?.(event.pointerId)) renderer.domElement.releasePointerCapture(event.pointerId);
+  if (cancelled) return true;
+  drag.currentX = event.clientX;
+  drag.currentY = event.clientY;
+  if (drag.moved) selectMarquee(drag);
+  else selectAt(event.clientX, event.clientY);
+  return true;
+}
+
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || draggingTransform || suppressClick || transform?.axis) return;
+  event.preventDefault();
+  marqueeDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY, moved: false };
+  renderer.domElement.setPointerCapture?.(event.pointerId);
+});
+renderer.domElement.addEventListener("pointermove", (event) => {
+  if (!marqueeDrag || marqueeDrag.pointerId !== event.pointerId) return;
+  marqueeDrag.currentX = event.clientX;
+  marqueeDrag.currentY = event.clientY;
+  marqueeDrag.moved ||= Math.hypot(event.clientX - marqueeDrag.startX, event.clientY - marqueeDrag.startY) >= 4;
+  if (marqueeDrag.moved) updateMarquee();
+});
+renderer.domElement.addEventListener("pointerup", (event) => {
+  if (finishMarquee(event)) return;
+  // TransformControls can consume the pointerdown while the click is still on
+  // the empty canvas. Keep Stage and Mirror deselection identical in that case.
+  if (event.button === 0 && !draggingTransform && !suppressClick) selectAt(event.clientX, event.clientY);
+});
+renderer.domElement.addEventListener("pointercancel", (event) => finishMarquee(event, true));
+
+document.addEventListener("keydown", (event) => {
+  if (typing() || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (event.key.toLowerCase() === "l") {
+    if (!mirrorMode) { event.preventDefault(); toggleStageSelectionLock(); }
+    return;
+  }
+  const mode = { r: "rotate", f: "translate", g: "scale" }[event.key.toLowerCase()];
+  if (mode) {
+    if (!mirrorMode && selected?.object) {
+      event.preventDefault();
+      setTransformMode(mode, true);
+    }
+    return;
+  }
+  if (event.key === "Delete") { if (mirrorMode) return; event.preventDefault(); document.getElementById("delete").click(); return; }
+  keys.add(event.key.toLowerCase());
+});
+document.addEventListener("keyup", (event) => {
+  if (!typing() && !event.ctrlKey && !event.altKey && !event.metaKey) keys.delete(event.key.toLowerCase());
+});
+document.addEventListener("keydown", (event) => {
+  if (mirrorMode || typing()) return;
+  if (event.ctrlKey && event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    setSelection(selectableStageObjects());
+  } else if (event.ctrlKey && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    postStage(event.shiftKey ? "/stage/redo" : "/stage/undo", undefined, event.shiftKey ? "redo" : "undo").catch((error) => setStatus(`history unavailable: ${error.message}`, "error"));
+  } else if (event.ctrlKey && event.key.toLowerCase() === "y") {
+    event.preventDefault();
+    postStage("/stage/redo", undefined, "redo").catch((error) => setStatus(`redo unavailable: ${error.message}`, "error"));
+  } else if (event.ctrlKey && event.key.toLowerCase() === "c") {
+    event.preventDefault();
+    copyStageSelection();
+  } else if (event.ctrlKey && event.key.toLowerCase() === "v") {
+    event.preventDefault();
+    pasteStageClipboard();
+  } else if (event.ctrlKey && event.key.toLowerCase() === "d") {
+    // duplicate = copy + paste in one keystroke
+    event.preventDefault();
+    copyStageSelection();
+    pasteStageClipboard();
+  }
+});
+window.addEventListener("blur", () => keys.clear());
+
+function flyTick() {
+  requestAnimationFrame(flyTick);
+  if (typing() || !keys.size) return;
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  if (forward.lengthSq() === 0) return;
+  forward.normalize();
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  const move = new THREE.Vector3();
+  if (keys.has("w")) move.add(forward);
+  if (keys.has("s")) move.sub(forward);
+  if (keys.has("d")) move.add(right);
+  if (keys.has("a")) move.sub(right);
+  if (keys.has("e")) move.y += 1;
+  if (keys.has("q")) move.y -= 1;
+  if (move.lengthSq() === 0) return;
+  move.normalize().multiplyScalar(keys.has("shift") ? 1.2 : 0.3);
+  camera.position.add(move);
+  controls.target.add(move);
+  updateSelectionHelpers();
+}
+flyTick();
+loadOptionalDump();
+renderExplorer();
+renderProperties();
+updateCsgLabel();
+updateGroupingButtons();
+renderGroundTarget(mirrorGroundTarget);
+if (mirrorMode) void loadGroundTarget();
+
+const es = new EventSource(stageRequestUrl(mirrorMode ? "/live/events" : "/stage/events"));
+es.addEventListener("open", () => {
+  dot.className = "dot live";
+  if (mirrorMode) hudtext.textContent = stageDump ? `${stageDump.dumped ?? stageDump.parts?.length ?? 0}/${stageDump.totalParts ?? stageDump.parts?.length ?? 0} parts · ${mirrorCoverageText(stageDump)}` : "Studio mirror";
+  else if (opCount === 0) hudtext.textContent = "connected - 0 ops staged";
+});
+es.addEventListener("stage-op", (e) => {
+  if (mirrorMode) return;
+  if (stageClientOverlay) return;
+  try {
+    appendOp(JSON.parse(e.data));
+    markSynced();
+    void loadHistory();
+  } catch {
+    // Keep the last good stage when a replay event is malformed.
+  }
+});
+es.addEventListener("stage-sync", (e) => {
+  if (mirrorMode) return;
+  const sync = parseStageSync(e.data);
+  if (!sync) {
+    setStatus("invalid stage-sync - keeping last-good render", "error");
+    return;
+  }
+  if (stageMutationBusy() || draggingTransform) {
+    rememberStageSync(sync);
+    return;
+  }
+  if (!stageSyncMatchesClientOverlay(sync)) {
+    rememberStageSync(sync);
+    return;
+  }
+  deferredStageSync = null;
+  stageClientOverlay = null;
+  if (!applyStageSync(sync)) {
+    setStatus("invalid stage-sync - keeping last-good render", "error");
+    return;
+  }
+  window.__buildkitStageReady = { session: stageSession, revision: sync.revision ?? null };
+  setStatus("synced - click a part to select");
+});
+es.addEventListener("mirror-sync", (e) => {
+  let dump;
+  try { dump = JSON.parse(e.data); } catch { dump = null; }
+  if (!isDump(dump)) {
+    setStatus("invalid mirror-sync - keeping last-good Explorer", "error");
+    return;
+  }
+  if (!acceptMirrorDump(dump)) return;
+  markSynced();
+  setStatus(mirrorStatusText(dump, "Studio autosync updated Explorer"), dump.coverage !== "complete" ? "error" : "ok");
+});
+es.addEventListener("stage-clear", () => {
+  if (mirrorMode) return;
+  stageOps = []; stageDump = null; clearAll(); renderExplorer(); renderProperties(); updateCsgLabel();
+  markSynced();
+  void loadHistory();
+});
+es.addEventListener("stage-history", () => { void loadHistory(); });
+es.onerror = () => { dot.className = "dot"; setStatus("live sync unavailable; keeping last-good render", "error"); };
+loadGenerations();
+loadHistory();
+setInterval(() => loadLibrary().catch(() => {}), 5000);
+</script>
+</body>
+</html>

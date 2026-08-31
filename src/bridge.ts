@@ -1,7 +1,8 @@
 // Bridge: localhost HTTP server that the Studio plugin long-polls.
 // The plugin GETs /poll?place=<game.Name> (held open until a command is queued or
-// ~25s elapse), runs the command in Studio, then POSTs /result. sendCommand()
-// correlates by id. When two Studios run the plugin, set an active place filter
+// ~25s elapse), runs the command in Studio, then POSTs /result. Plugin-side viewer
+// autosync pushes snapshots to /mirror. sendCommand() correlates commands by id.
+// When two Studios run the plugin, set an active place filter
 // (rbx_use_place) so commands only dispatch to the Studio whose name matches.
 //
 // SHARED BRIDGE (multi-agent): two MCP clients (e.g. Claude + Codex) each spawn
@@ -24,6 +25,7 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 type Waiter = { fn: (c: Cmd | null) => void; place: string; ctx: string };
+type MirrorHandler = (place: string, dump: unknown) => boolean | Promise<boolean>;
 
 const POLL_HOLD_MS = 25_000; // how long /poll is held open when idle
 
@@ -50,6 +52,7 @@ export class Bridge {
   private port = 44760;
   private clientPlaces: string[] = [];
   private clientRuntimePlaces: string[] = [];
+  private mirrorHandler?: MirrorHandler;
   // Settings pushed from the Studio plugin's BuildKit Settings panel (Open Cloud key,
   // Creator ID, ComfyUI URL, Hunyuan endpoint, build-mode toggles). Held in memory so
   // tools (mesh upload / ComfyUI) can read them; never persisted to disk or a place.
@@ -174,6 +177,12 @@ export class Bridge {
   // Play-mode runtime harnesses seen in the last 30s.
   listRuntimePlaces(): string[] {
     return this.freshPlaces(this.runtimePlaces, this.clientRuntimePlaces);
+  }
+
+  // Plugin-side autosync pushes its already-serialized scene dump through the same
+  // authenticated localhost boundary as commands. The owner handles the browser fan-out.
+  setMirrorHandler(handler: MirrorHandler | undefined) {
+    this.mirrorHandler = handler;
   }
 
   // Queue a command for the plugin and resolve when /result arrives. ctx picks
@@ -388,6 +397,52 @@ export class Bridge {
           res.writeHead(400);
           res.end("bad json");
         }
+      });
+      return;
+    }
+
+    // Plugin-side autosync: accept a scene snapshot without queuing a command back to
+    // Studio. The owner process writes the mirror and broadcasts it to browser clients.
+    if (req.method === "POST" && (url === "/mirror" || url.startsWith("/mirror?"))) {
+      if (this.rejectBrowser(req, res)) return;
+      if (!this.requireToken(req, res)) return;
+      if (!this.requireJson(req, res)) return;
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        let d: any;
+        try {
+          d = JSON.parse(body || "{}");
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "bad json" }));
+          return;
+        }
+        if (!d || typeof d.place !== "string" || !d.place || !d.dump || typeof d.dump !== "object" || !Array.isArray(d.dump.parts)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "mirror requires place and dump.parts" }));
+          return;
+        }
+        if (!this.mirrorHandler) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "mirror handler unavailable" }));
+          return;
+        }
+        Promise.resolve()
+          .then(() => this.mirrorHandler!(d.place, d.dump))
+          .then((accepted) => {
+            if (accepted === false) {
+              res.writeHead(409, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "place is not selected" }));
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+          })
+          .catch((e) => {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: String(e instanceof Error ? e.message : e) }));
+          });
       });
       return;
     }

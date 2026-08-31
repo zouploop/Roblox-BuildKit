@@ -24,21 +24,24 @@ jobs:
       - run: npm test
       - name: Audit dependencies (must stay clean)
         run: npm audit --audit-level=moderate
-      # The .rbxmx is generated from the plugin source but also tracked, so it can drift
-      # if someone edits the .luau and commits without building. Regenerate and diff.
-      # Uses bash explicitly: the previous `\`-continuation was interpreted literally by
-      # PowerShell on the Windows leg (git saw the path as "\/BuildKitPlugin.rbxmx").
-      - name: Check the committed plugin artifact matches its source
+      # BuildKitPlugin.rbxmx is generated from the ModuleScripts in plugin/src/*.luau.
+      # It drifts if someone edits a module and commits without building.
+      # Regenerate the artifact and diff. Uses bash explicitly: the previous `\`-continuation was
+      # interpreted literally by PowerShell on the Windows leg (git saw the path as
+      # "\/BuildKitPlugin.rbxmx").
+      - name: Check the committed plugin artifacts match their source
         shell: bash
         run: |
           node scripts/gen-rbxmx.mjs
           git diff --exit-code -- plugin/BuildKitPlugin.rbxmx \
-            || { echo "::error::plugin/BuildKitPlugin.rbxmx is stale — run 'npm run build' and commit the result"; exit 1; }
+            || { echo "::error::plugin artifacts are stale — run 'npm run build' and commit the result"; exit 1; }
+      - name: Check plugin scope oracle
+        run: node scripts/check-plugin.mjs
 
   # Luau lint for the plugin — the layer with no other automated checks. Selene is a
-  # headless binary, so this runs fine without Studio. Fail on real errors (parse
-  # failures, undefined vars); the legacy warning backlog is non-fatal but counted and
-  # printed so it can't silently regress. Tighten to fail-on-warning as the backlog clears.
+  # headless binary, so this runs fine without Studio. Fail on real errors (parse failures,
+  # undefined vars); the legacy warning backlog is non-fatal but printed so it can't silently
+  # regress. Tighten to fail-on-warning as the backlog clears.
   luau-lint:
     runs-on: ubuntu-latest
     steps:
@@ -51,7 +54,7 @@ jobs:
           sudo chmod +x /usr/local/bin/selene
       - name: Lint the Luau plugin
         run: |
-          # Selene on the plugin (0.31.0). Historically warn-only via `|| true`, which
-          # masked real errors. Now: fail on genuine errors, pass on the legacy warning
-          # backlog. Output goes straight to the log so failures are debuggable.
-          selene plugin --config selene.toml --allow-warnings
+          # Lint each ModuleScript now that its imports and exports define its scope.
+          # Historically warn-only via `|| true`, which masked real errors. Now: fail on
+          # genuine errors, pass on the legacy warning backlog, and print output directly.
+          selene plugin/src --config selene.toml --allow-warnings

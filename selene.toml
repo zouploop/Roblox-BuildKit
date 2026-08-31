@@ -1,7 +1,6 @@
-# Selene config for the BuildKit Luau plugin.
-# The plugin is a single --!nocheck 5k-line file with a legacy warning backlog, so this
-# is deliberately permissive: the CI job reports the warning count but doesn't fail.
-# Tighten lints (and drop the --!nocheck) as the file gets split into ModuleScripts.
+# Selene config for the BuildKit Luau ModuleScripts in plugin/src/.
+# The modules inherit a legacy warning backlog, so CI reports the count but fails on errors.
+# Tighten lints as the module code is cleaned up; the blocking scope oracle remains separate.
 std = "roblox"
 
 [lints]
