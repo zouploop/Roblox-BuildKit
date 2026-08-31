@@ -128,18 +128,6 @@ const SYNC_REGION = z.union([
   z.object({ min: z.array(z.number()).length(3), max: z.array(z.number()).length(3) }),
 ]);
 
-// --- capture: frame a target and screenshot the Studio window ----------------
-
-
-// --- floor plan: top-down with everything above the ceiling hidden -----------
-
-
-// --- orbit: turntable contact sheet (pseudo-3D) ------------------------------
-
-
-// --- inspect: bounding box + counts ------------------------------------------
-
-
 registerTool(
   "rbx_build",
   {
@@ -1980,12 +1968,6 @@ registerTool(
 
 );
 
-// --- measure: distance/delta between two points ------------------------------
-
-
-// --- find: query the scene instead of guessing exact names -------------------
-
-
 // --- cast: raycast / volume overlap query ------------------------------------
 registerTool(
   "rbx_cast",
@@ -3415,8 +3397,8 @@ function startViewerServer() {
       res.end("not found");
     }
   });
-  // Multiple buildkit processes can legitimately coexist (Claude Code's MCP-managed
-  // instance + a manually-run `start.bat`, or two agents) — the bridge (44760) already
+  // Multiple buildkit processes can legitimately coexist (an agent-managed instance
+  // plus a manually-run `start.bat`, or two agents) — the bridge (44760) already
   // handles this via owner/client fallback. The viewer server has no such thing, so
   // without this handler a second instance's EADDRINUSE was an unhandled 'error' event,
   // which crashes the WHOLE process (including its stdio MCP capability) over an

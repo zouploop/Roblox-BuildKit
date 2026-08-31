@@ -27,14 +27,14 @@ catalog, then `rbx_enable_tools({names:["rbx_tool_name"]})` before calling a spe
 Roblox Studio **Plugins** folder (Studio → Plugins → Plugins Folder), then enable it.
 The server screenshots the Studio window, so keep Studio open while building.
 
-**2. Install the skill** — copy this folder into your agent's skills directory, wherever
-that agent reads skills from (e.g. `~/.claude/skills/` for Claude agents).
+**2. Install the skill** — copy this folder into the skills directory configured for
+your agent.
 
 **3. Register the MCP server** — build it first (`npm install && npm run build` in the repo
 root), then run `npm run setup`. The setup command resolves this checkout's absolute
-`dist/index.js` path and registers it with Claude Code. If Claude Code is not on `PATH`, it
-prints the exact command to run; `npm run setup -- --print` always prints without changing
-configuration. No path editing is required.
+`dist/index.js` path and registers it with the supported local agent integration. If that
+integration is not on `PATH`, it prints the exact command to adapt; `npm run setup -- --print`
+always prints without changing configuration. No path editing is required.
 
 The server starts when the agent session starts and stops when it ends — it is not tied to
 Studio. The plugin long-polls it and auto-reconnects, so order of launch doesn't matter.

@@ -24,7 +24,7 @@ Custom MCP + Studio plugin. Server lives in the repo checkout; plugin output tar
 run `npm run build` (compiles `dist/` and regenerates the `.rbxmx`; it installs a copy when the
 local Plugins folder exists) and restart Studio.
 
-**Tool preference — default to `rbx_*`, not the official `Roblox_Studio` MCP.** BuildKit's bridge now serves **two MCP clients at once** (Claude + Codex share one bridge; second client forwards over `/submit`, self-promotes if the owner exits). The official `Roblox_Studio` MCP is **single-active-studio** — two agents driving it fight over `set_active_studio`/`execute_luau`. So for everything BuildKit covers — build / edit / batch / inspect / describe / qa / measure / selection / checkpoint / undo / lighting / gui / frame — use `rbx_*`. Fall back to official tools ONLY where BuildKit has no equivalent: `screen_capture` (the render backend, **always fed `rbx_frame` coords** — there is no background-safe buildkit capture), `execute_luau` for geometry richer than `rbx_build`, and play-mode (`start_stop_play`). Never drive the official MCP standalone for what `rbx_*` already does.
+**Tool preference — default to `rbx_*`, not the official `Roblox_Studio` MCP.** BuildKit's bridge can serve **two MCP clients at once**; a second client forwards over `/submit` and self-promotes if the owner exits. The official `Roblox_Studio` MCP is **single-active-studio** — two agents driving it fight over `set_active_studio`/`execute_luau`. So for everything BuildKit covers — build / edit / batch / qa / selection / checkpoint / undo / lighting / gui / frame — use `rbx_*`. Fall back to official tools ONLY where BuildKit has no equivalent: `screen_capture` (the render backend, **always fed `rbx_frame` coords** — there is no background-safe buildkit capture), `execute_luau` for geometry richer than `rbx_build`, and play-mode (`start_stop_play`). Never drive the official MCP standalone for what `rbx_*` already does.
 
 | Tool | Use |
 |------|-----|
@@ -69,14 +69,14 @@ local Plugins folder exists) and restart Studio.
 
 The current server manifest registers 57 named `rbx_*` endpoints when the optional mesh pipeline
 is present (56 otherwise; down from the former 64 — `rbx_capture`,
-`rbx_orbit`, `rbx_floor_plan`, `rbx_isolate`, `rbx_annotate` folded into `rbx_view`;
-`rbx_describe`, `rbx_inspect`, `rbx_find` superseded by `rbx_map`; `rbx_measure` superseded by
+`rbx_orbit`, and `rbx_floor_plan` are composed by `rbx_view`; `rbx_describe`, `rbx_inspect`,
+`rbx_find`, and `rbx_measure` are covered by `rbx_map`;
 `rbx_map` bounds arithmetic — retired 2026-08-31); `rbx_gen_mesh` is conditional. These primary tools cover most work. Everything below this block is the **specialist layer** — still valid, reach for it when the primary tools don't cover the case.
 
 | Tool | Use |
 |------|-----|
 | `rbx_place({prefab,...})` | **Place many instances from one instruction — the map-building verb.** `mode:'palette'` lists prefabs. Use `place`, `line`, `grid`, `ring`, or `scatter`; `abut:true` derives line/grid spacing from the prefab bbox and returns adjacent-gap diagnostics. Shared modifiers include `ground`, `snap`, `rotate`, `jitter`, and `seed`; max 500 clones. |
-| `rbx_map({name/className/material/region/tag/selection/target, detail, lod, maxParts})` | **READ the live place as data.** `name` is a glob (`'Oak*'`); `region` is `{center,radius}` or `{min,max}`; `selection:true` maps what the user clicked in Studio. `detail:'summary'` (default) → counts + bounds + samples; `detail:'parts'` → every match. `lod:'bbox'` → one box per target. `maxParts` ≤800. **`region` filters before the 800-part serialization cap.** Still inspect `truncated`/coverage and narrow the target or region when the result is incomplete. **Use instead of** describe/inspect/find/scene_dump for most reads — it returns a scoped subgraph, not a dump. |
+| `rbx_map({name/className/material/region/tag/selection/target, detail, lod, maxParts})` | **READ the live place as data.** `name` is a glob (`'Oak*'`); `region` is `{center,radius}` or `{min,max}`; `selection:true` maps what the user clicked in Studio. `detail:'summary'` (default) → counts + bounds + samples; `detail:'parts'` → every match. `lod:'bbox'` → one box per target. `maxParts` ≤800. **`region` filters before the 800-part serialization cap.** Still inspect `truncated`/coverage and narrow the target or region when the result is incomplete. Use `rbx_scene_dump` only when Mirror needs its full hierarchy payload. |
 | `rbx_view({target, view, elevation, zoom, angles, isolate, cutaway, cutawayY, annotate, contrast, restore})` | **LOOK, with camera + visibility composed into ONE call.** `view`: front/back/left/right/iso/top. `angles` 1–24 = turntable contact sheet. `isolate` hides everything else; `cutaway:'roof'` or `cutawayY:<n>` cuts the top off; `annotate` overlays bbox+dims; `contrast` recolors so seams/gaps pop. `restore` defaults **true** (undoes camera+visibility after). **Replaces** capture/orbit/floor_plan/frame/isolate/annotate chains — "isolate the sink, cut the roof, 4 annotated angles" is one call. |
 | `rbx_apply({ops:[…], view?})` | **EDIT existing content**, all ops in ONE undo recording when available. Each op takes `target` **or** a `select` filter (same shape as `rbx_map`) — so "move all 47 trees up 2" is **one op, not 47**. Ops: `move`(delta) `rotate`(degrees) `scale` `recolor`(color) `material` `anchor` `rename` `delete` `clone`(offset) `ground` plus **`replace`**(spec) **`scatter`**(count/region/seed) **`distribute`**(from/to) **`align`**(axis/value). Optional `view` renders after the edit — don't spend a separate capture call. |
 | `rbx_dev_reload()` | **After editing `src/*.ts`.** Rebuilds, swaps the stale viewer server, verifies old→new PID. A plain `/mcp` reconnect often re-attaches to the **OLD process**, so changes silently don't take effect (this cost ~30 wasted calls in one session). Refuses to kill the current MCP process or a listener whose ownership changed mid-build. |
@@ -104,7 +104,7 @@ tool list changes.
 
 ---
 
-**The other `rbx_*` tools are the SPECIALIST LAYER** — capture / orbit / watch / floor_plan / describe / inspect / find / cast / script / prop / group / console / checkpoint / restore / diff / optimize / navcheck / measure / selection / tag / attr / sync / gui / set_lighting / insert / gen_mesh / batch / undo / stage_* / live_sync_* / scene_dump / run / runtime / use_place / status / isolate / annotate / qa. Reach for them only when the primary tools above don't cover the case.
+**The other `rbx_*` tools are the SPECIALIST LAYER** — watch / cast / script / prop / group / console / checkpoint / restore / diff / optimize / navcheck / selection / tag / attr / sync / gui / set_lighting / insert / gen_mesh / batch / undo / stage_* / live_sync_* / scene_dump / run / runtime / use_place / status / isolate / annotate / conformance / map_* / ground_part. Reach for them only when the primary tools above don't cover the case.
 
 ### Safety boundaries
 
