@@ -9,15 +9,17 @@ Skills for any AI agent, packaged to pair with the
 |-------|---------|
 | `roblox-building` | Build/improve structures, interiors, props, whole scenes — drives the generator-file build loop, the browser stage/mirror editor, and the BuildKit capture loop |
 | `roblox-gui` | Build, animate, and debug Roblox GUI elements — HUDs, menus, world-space UI, player labels, UDim2 sizing, TweenService animations |
+| `roblox-extreme-quality` | Reference-driven iterative building when quality matters more than speed — spec first, verify against the spec, iterate with checkpoints |
+| `roblox-build-subagents` | Coordinate parallel subagents through isolated headless Stage sessions to build, render, review, and combine props or map regions, without letting workers touch Studio |
 
 Each skill carries a **"Using the BuildKit MCP"** section pointing at the relevant
 `rbx_*` tools (see the root [`README.md`](../README.md) for the full server/plugin design).
 
-For parallel prop work, assign each subagent a unique Stage session (maximum six):
-`rbx_stage_build` → `rbx_stage_status`/`rbx_stage_render` → `rbx_stage_clear`, then
-`rbx_library_save`; use `rbx_library_list` and `rbx_library_category_create` to organize
-results. These subagents must never call Studio/bridge tools or `rbx_stage_commit`; the user
-explicitly ports selected winners later.
+For parallel map or prop work, use `roblox-build-subagents`. It defines the isolated
+session, headless rendering, library handoff, and coordinator-only integration boundary.
+
+The server lazy-loads specialist tools. Use `rbx_list_tools({query:"..."})` to search the full
+catalog, then `rbx_enable_tools({names:["rbx_tool_name"]})` before calling a specialist tool.
 
 ## Install
 
