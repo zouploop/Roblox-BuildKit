@@ -51,3 +51,7 @@
 # Build output + local creds (the Open Cloud key lives in ~/.buildkit/config.json, outside
 # the repo, so the whitelist above can never track it).
 dist/
+
+# Local test suite. Already covered by the root whitelist; kept explicit so adding a new
+# root exception cannot accidentally expose test fixtures.
+/tests/
