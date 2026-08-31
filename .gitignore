@@ -30,8 +30,8 @@
 /viewer/scene.json
 /viewer/.assetcache/
 !/library/
-!/library/**
-/library/recent-*.json
+/library/*
+!/library/.gitkeep
 
 !/skills/
 !/skills/**
