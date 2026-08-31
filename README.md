@@ -1,5 +1,22 @@
 # roblox-buildkit
 
+BuildKit is an AI-first way to build Roblox scenes: it gives an agent a compact tool surface,
+visual feedback, and batch edits instead of forcing it to guess coordinates through long chains
+of raw Studio commands.
+
+## Why BuildKit stands out
+
+- **Fewer tokens at startup.** Only core tools and discovery helpers appear initially; specialist
+  tools load on demand, keeping irrelevant schemas out of the agent's context.
+- **More work per call.** `rbx_apply`, `rbx_batch`, and `rbx_place` combine edits, placement
+  patterns, and undoable operations, reducing round trips.
+- **Visual truth, not blind generation.** `rbx_map` reads the live place as data, `rbx_view`
+  composes inspection views, and `rbx_qa` catches gaps, overlaps, z-fights, and loose geometry.
+- **A real editing loop.** Build in isolated Stage sessions, sync to Mirror, inspect from multiple
+  angles, then apply verified changes to Studio.
+- **Repeatable and portable.** Deterministic placement seeds, scoped reads, atomic edits, history,
+  and portable setup keep large scenes manageable.
+
 Windows tooling for building Roblox scenes with an AI agent. The repository contains:
 
 - a TypeScript MCP server;
