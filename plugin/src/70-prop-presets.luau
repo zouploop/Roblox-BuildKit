@@ -767,47 +767,65 @@ local function scaleP(ps, k)
 	return t
 end
 
--- Opt-in CSG for props: SUBTRACT parts flagged `negate` (real hollow vessels), then
--- UNION the remaining solids into one smooth operation. Guarded — any failure leaves
--- the parts as-is and returns false. Returns true if a union replaced the parts.
-local function csgProp(model)
-	local solids, negs = {}, {}
+-- Opt-in CSG for props: UNION the default parts, SUBTRACT subtract parts, then
+-- INTERSECT intersect parts. Guarded — any failure leaves the raw parts as-is and
+-- returns false. `__negate` remains a backwards-compatible subtract alias.
+-- maxParts is configurable (spec.csgMax, or the viewer's stage-wide default). 100 is the
+-- default rather than a hard rule: past roughly Roblox's ~20k-tri union budget CSG starts
+-- simplifying or erroring, but where that bites depends on the geometry, so the caller
+-- decides. Above the cap the parts are left unmerged rather than risking a degenerate union.
+local function csgProp(model, maxParts)
+	local unions, subtracts, intersects = {}, {}, {}
 	for _, p in ipairs(model:GetChildren()) do
 		if p:IsA("BasePart") then
-			if p:GetAttribute("__negate") then table.insert(negs, p) else table.insert(solids, p) end
+			local op = p:GetAttribute("__op")
+			if op == "subtract" or (op == nil and p:GetAttribute("__negate")) then
+				table.insert(subtracts, p)
+			elseif op == "intersect" then
+				table.insert(intersects, p)
+			else
+				table.insert(unions, p)
+			end
 		end
 	end
-	if #solids == 0 then return false end
-	-- tri-budget guard: a CSG union simplifies/errors past Roblox's ~20k-tri cap, so skip CSG
-	-- on very part-heavy props (keep them as separate parts) rather than risk a degenerate union.
-	if (#solids + #negs) > 48 then return false end
-	-- (BasePart:Union/SubtractAsync used here for reliability — they consume inputs and return
-	-- the operation directly. GeometryService:UnionAsync is the recommended future path but
-	-- returns an array + doesn't consume inputs; migrate once it can be verified post-restart.)
-	local primary = table.remove(solids, 1)
-	if #negs > 0 then
-		local ok, res = pcall(function() return primary:SubtractAsync(negs) end)
+	if #unions == 0 then return false end
+	local cap = tonumber(maxParts) or 100
+	if cap < 1 then cap = 1 end
+	if (#unions + #subtracts + #intersects) > cap then return false end
+	-- BasePart CSG methods are used here for reliability: they return the operation directly
+	-- while leaving source parts available for cleanup after the whole sequence.
+	local primary = table.remove(unions, 1)
+	local generated = {}
+	local function apply(parts, op)
+		if #parts == 0 then return true end
+		local ok, res = pcall(function()
+			if op == "subtract" then return primary:SubtractAsync(parts) end
+			if op == "intersect" then return primary:IntersectAsync(parts) end
+			return primary:UnionAsync(parts)
+		end)
 		if not ok or typeof(res) ~= "Instance" or not res:IsA("BasePart") then return false end
 		res.Parent = model
+		table.insert(generated, res)
 		primary = res
+		return true
 	end
-	if #solids > 0 then
-		local ok, res = pcall(function() return primary:UnionAsync(solids) end)
-		if not ok or typeof(res) ~= "Instance" or not res:IsA("BasePart") then return false end
-		res.Parent = model
-		primary = res
+	local function fail()
+		for _, p in ipairs(generated) do pcall(function() p:Destroy() end) end
+		return false
 	end
+	if not apply(unions, "union") then return fail() end
+	if not apply(subtracts, "subtract") then return fail() end
+	if not apply(intersects, "intersect") then return fail() end
 	primary.Name = model.Name .. "Union"
 	primary.Anchored = true
 	pcall(function() primary.UsePartColor = true end) -- keep the source parts' colours
 	pcall(function() primary.CollisionFidelity = Enum.CollisionFidelity.Box end) -- cheap collision for small props
 	pcall(function() primary.RenderFidelity = Enum.RenderFidelity.Precise end) -- crisp up-close render
-		-- BasePart Union/SubtractAsync do NOT consume their inputs: the source parts and the
-		-- intermediate subtract-union survive as orphan children. Destroy everything but the
-		-- final union so the prop is ONE clean solid (not union + leftover raw parts).
-		for _, p in ipairs(model:GetChildren()) do
-			if p:IsA("BasePart") and p ~= primary then pcall(function() p:Destroy() end) end
-		end
+	-- BasePart CSG methods return a new operation; remove source and intermediate parts
+	-- after the complete sequence so a failed operation can safely fall back to raw parts.
+	for _, p in ipairs(model:GetChildren()) do
+		if p:IsA("BasePart") and p ~= primary then pcall(function() p:Destroy() end) end
+	end
 	model.PrimaryPart = primary
 	return true
 end

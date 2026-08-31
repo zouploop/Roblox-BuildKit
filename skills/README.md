@@ -7,11 +7,17 @@ Skills for any AI agent, packaged to pair with the
 
 | Skill | Use for |
 |-------|---------|
-| `roblox-building` | Build/improve structures, interiors, props, whole scenes — drives the BuildKit capture loop |
+| `roblox-building` | Build/improve structures, interiors, props, whole scenes — drives the generator-file build loop, the browser stage/mirror editor, and the BuildKit capture loop |
 | `roblox-gui` | Build, animate, and debug Roblox GUI elements — HUDs, menus, world-space UI, player labels, UDim2 sizing, TweenService animations |
 
 Each skill carries a **"Using the BuildKit MCP"** section pointing at the relevant
 `rbx_*` tools (see the root [`README.md`](../README.md) for the full server/plugin design).
+
+For parallel prop work, assign each subagent a unique Stage session (maximum six):
+`rbx_stage_build` → `rbx_stage_status`/`rbx_stage_render` → `rbx_stage_clear`, then
+`rbx_library_save`; use `rbx_library_list` and `rbx_library_category_create` to organize
+results. These subagents must never call Studio/bridge tools or `rbx_stage_commit`; the user
+explicitly ports selected winners later.
 
 ## Install
 
@@ -23,21 +29,10 @@ The server screenshots the Studio window, so keep Studio open while building.
 that agent reads skills from (e.g. `~/.claude/skills/` for Claude agents).
 
 **3. Register the MCP server** — build it first (`npm install && npm run build` in the repo
-root; the server source ships in `src/`). It runs as its own Node process from the repo
-checkout — it does **not** install into the Roblox plugins folder. Copy/paste the block
-below into your agent's MCP config (e.g. `.mcp.json`), replacing the path with your repo
-checkout:
-
-```json
-{
-  "mcpServers": {
-    "roblox-buildkit": {
-      "command": "node",
-      "args": ["C:/absolute/path/to/roblox-buildkit/dist/index.js"]
-    }
-  }
-}
-```
+root), then run `npm run setup`. The setup command resolves this checkout's absolute
+`dist/index.js` path and registers it with Claude Code. If Claude Code is not on `PATH`, it
+prints the exact command to run; `npm run setup -- --print` always prints without changing
+configuration. No path editing is required.
 
 The server starts when the agent session starts and stops when it ends — it is not tied to
 Studio. The plugin long-polls it and auto-reconnects, so order of launch doesn't matter.

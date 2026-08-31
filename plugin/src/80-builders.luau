@@ -39,13 +39,64 @@ local function buildProp(spec)
 	parts = parts or {}
 	local default = pname and (pname:sub(1, 1):upper() .. pname:sub(2)) or "Prop"
 	local model = getOrMakeModel(spec.parent, spec.name or default)
-	for _, ps in ipairs(parts) do
-		makePart(model, scaleP(ps, k), c[1], c[2], c[3])
+	-- Keep the created instances so the CSG stash below can read their REAL transforms
+	-- rather than re-deriving them from the spec (see the convention note there).
+	local created = {}
+	for i, ps in ipairs(parts) do
+		created[i] = makePart(model, scaleP(ps, k), c[1], c[2], c[3])
 	end
 	model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart")
-	-- Opt-in CSG: union solids (subtract `negate` parts first) into one smooth solid.
+
+	-- Snapshot the sources BEFORE csgProp runs — it destroys them to leave one clean solid.
+	--
+	-- Record their ACTUAL WORLD TRANSFORMS, not the spec. The spec's `rot` is degrees bound
+	-- for CFrame.Angles (XYZ order); every dumped part instead carries radians from
+	-- CFrame:ToOrientation() (YXZ order). Emitting the spec made the viewer decode one
+	-- convention with the other, which is why rebuilt branch angles came out wrong. Reading
+	-- them back here leaves exactly ONE rotation convention end to end.
+	local csgSource = nil
+	if wantCsg then
+		csgSource = {}
+		for i, p in ipairs(created) do
+			if p then
+				local rx, ry, rz = p.CFrame:ToOrientation()
+				local shape = "Block"
+				if p:IsA("Part") then
+					shape = p.Shape.Name
+				elseif p:IsA("WedgePart") then
+					shape = "Wedge"
+				elseif p:IsA("CornerWedgePart") then
+					shape = "CornerWedge"
+				end
+				local ps = parts[i]
+				table.insert(csgSource, {
+					shape = shape,
+					pos = { p.Position.X, p.Position.Y, p.Position.Z },
+					rot = { rx, ry, rz },
+					size = { p.Size.X, p.Size.Y, p.Size.Z },
+					color = {
+						math.floor(p.Color.R * 255 + 0.5),
+						math.floor(p.Color.G * 255 + 0.5),
+						math.floor(p.Color.B * 255 + 0.5),
+					},
+					material = p.Material.Name,
+					transparency = p.Transparency,
+					op = ps and (ps.op or (ps.negate and "subtract")) or nil,
+				})
+			end
+		end
+	end
+
+	-- Opt-in CSG: union default parts, subtract/intersect per-part operation buckets.
 	-- A union isn't a parts list, so CSG props skip the regen script (final bake, not parametric).
-	if wantCsg and csgProp(model) then
+	if wantCsg and csgProp(model, spec.csgMax) then
+		-- A union dumps as its BOUNDING BOX (the plugin cannot read the real solid back out
+		-- of Studio), so the browser needs these sources to redraw the true shape.
+		local okc, jc = pcall(function() return HttpService:JSONEncode(csgSource) end)
+		local union = model.PrimaryPart
+		if okc and union then
+			union:SetAttribute("BuildKitCsgParts", jc)
+		end
 		return model
 	end
 	-- Self-contained procedural model: stash the UNSCALED parts + embed a runtime

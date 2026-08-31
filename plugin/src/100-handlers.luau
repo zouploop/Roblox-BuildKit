@@ -30,6 +30,7 @@ local getBBox = require(script.Parent.Geometry).getBBox
 local partsOf = require(script.Parent.Geometry).partsOf
 local pivotWorld = require(script.Parent.Geometry).pivotWorld
 local describeInst = require(script.Parent.Geometry).describeInst
+local sceneDump = require(script.Parent.Geometry).sceneDump
 local gmerge = require(script.Parent.Gui).gmerge
 local GUI_DEFAULT_THEME = require(script.Parent.Gui).GUI_DEFAULT_THEME
 local buildNode = require(script.Parent.Gui).buildNode
@@ -142,6 +143,22 @@ function handlers.restore_camera(args)
 	return { ok = true }
 end
 
+local function fitDistance(size, dir, fov, viewport, up)
+	local aspect = (viewport.Y > 0 and viewport.X > 0) and (viewport.X / viewport.Y) or 1
+	local half = size / 2
+	local basis = CFrame.lookAt(Vector3.zero, -dir, up or Vector3.new(0, 1, 0))
+	local right, cameraUp, forward = basis.RightVector, basis.UpVector, basis.LookVector
+	local halfWidth = math.abs(right.X) * half.X + math.abs(right.Y) * half.Y + math.abs(right.Z) * half.Z
+	local halfHeight = math.abs(cameraUp.X) * half.X + math.abs(cameraUp.Y) * half.Y + math.abs(cameraUp.Z) * half.Z
+	local halfDepth = math.abs(forward.X) * half.X + math.abs(forward.Y) * half.Y + math.abs(forward.Z) * half.Z
+	local verticalHalfFov = math.rad(fov) / 2
+	local horizontalHalfFov = math.atan(math.tan(verticalHalfFov) * aspect)
+	return math.max(
+		halfHeight / math.max(math.tan(verticalHalfFov), 1e-4),
+		halfWidth / math.max(math.tan(horizontalHalfFov), 1e-4)
+	) + halfDepth
+end
+
 -- Fit math shared by frame (moves the camera) and frame_coords (returns only).
 local function computeFrame(target, view, zoom)
 	local center, size = getBBox(target)
@@ -149,8 +166,8 @@ local function computeFrame(target, view, zoom)
 	view = view or "iso"
 	local dir = (VIEW_DIRS[view] or VIEW_DIRS.iso).Unit
 	local fov = cam.FieldOfView
-	local radius = size.Magnitude / 2
-	local dist = (radius / math.tan(math.rad(fov) / 2)) * (zoom or 1.1)
+	local up = (view == "top") and Vector3.new(0, 0, -1) or Vector3.new(0, 1, 0)
+	local dist = fitDistance(size, dir, fov, cam.ViewportSize, up) * (zoom or 1.1)
 	local camPos = center + dir * dist
 	return center, size, camPos, fov, view
 end
@@ -197,8 +214,8 @@ function handlers.frame_dir(args)
 	end
 	dir = dir.Unit
 	local fov = cam.FieldOfView
-	local radius = size.Magnitude / 2
-	local dist = (radius / math.tan(math.rad(fov) / 2)) * (args.zoom or 1.15)
+	local fitUp = (math.abs(dir.Y) > 0.98) and Vector3.new(0, 0, -1) or Vector3.new(0, 1, 0)
+	local dist = fitDistance(size, dir, fov, cam.ViewportSize, fitUp) * (args.zoom or 1.15)
 	local camPos = center + dir * dist
 	-- near-vertical views need a non-Y up vector or lookAt gimbal-flips
 	if math.abs(dir.Y) > 0.98 then
@@ -228,7 +245,8 @@ function handlers.frame_dir_coords(args)
 	end
 	dir = dir.Unit
 	local fov = cam.FieldOfView
-	local dist = (size.Magnitude / 2 / math.tan(math.rad(fov) / 2)) * (args.zoom or 1.15)
+	local fitUp = (math.abs(dir.Y) > 0.98) and Vector3.new(0, 0, -1) or Vector3.new(0, 1, 0)
+	local dist = fitDistance(size, dir, fov, cam.ViewportSize, fitUp) * (args.zoom or 1.15)
 	local camPos = center + dir * dist
 	return {
 		camera_position = { camPos.X, camPos.Y, camPos.Z },
@@ -242,11 +260,32 @@ end
 
 -- Edit an existing target in place (so build -> see -> fix needs no raw Luau).
 function handlers.edit(args)
+	args = args or {}
 	local inst = findInst(args.target)
 	if not inst then
 		error("target not found: " .. tostring(args.target))
 	end
 	local op = args.op
+	local position, rotation, size
+	if op == "transform" then
+		if not inst:IsA("BasePart") then error("transform target must be a BasePart") end
+		local function numericArray(value, label)
+			if type(value) ~= "table" or #value ~= 3 then error(label .. " must be [x,y,z]") end
+			for i = 1, 3 do
+				local number = value[i]
+				if type(number) ~= "number" or number ~= number or number == math.huge or number == -math.huge then
+					error(label .. "[" .. i .. "] must be a finite number")
+				end
+			end
+			return value
+		end
+		position = numericArray(args.position, "transform position")
+		rotation = numericArray(args.rotation, "transform rotation")
+		size = numericArray(args.size, "transform size")
+		if size[1] <= 0 or size[2] <= 0 or size[3] <= 0 then
+			error("transform size values must be positive")
+		end
+	end
 	local bC, bS
 	if inst:IsA("Model") or inst:IsA("BasePart") then
 		bC, bS = bboxOf(inst)
@@ -302,6 +341,10 @@ function handlers.edit(args)
 			else
 				error("scale target must be a Model or BasePart")
 			end
+		elseif op == "transform" then
+			inst.CFrame = CFrame.new(position[1], position[2], position[3])
+				* CFrame.fromOrientation(math.rad(rotation[1]), math.rad(rotation[2]), math.rad(rotation[3]))
+			inst.Size = Vector3.new(size[1], size[2], size[3])
 		elseif op == "recolor" then
 			local c = colorOf(args.color, nil)
 			if not c then error("recolor needs color [r,g,b]") end
@@ -337,6 +380,11 @@ function handlers.edit(args)
 				center = { r1(center.X), r1(center.Y), r1(center.Z) },
 				size = { r1(size.X), r1(size.Y), r1(size.Z) },
 			}
+			if op == "transform" then
+				res.target = inst:GetFullName()
+				res.position = { r1(inst.Position.X), r1(inst.Position.Y), r1(inst.Position.Z) }
+				res.rotation = { rotation[1], rotation[2], rotation[3] }
+			end
 			if skipped > 0 then res.skippedLocked = skipped end
 			if bC then
 				local d = center - bC
@@ -407,7 +455,7 @@ end
 -- front off its tray, a handle floating off its panel. Scoped per-leaf-model so a drawer's
 -- sliding clearance to the CARCASS (a different model) is never mistaken for a defect.
 -- ov = realOverlaps set over the whole instance; seats (optional) collects {part,move} to auto-seat.
-local function assemblyGaps(root, out, ov, seats)
+local function assemblyGaps(root, out, ov, seats, allowed)
 	local function isLeaf(m)
 		if not m:IsA("Model") then return false end
 		local hasPart = false
@@ -425,7 +473,7 @@ local function assemblyGaps(root, out, ov, seats)
 	for _, m in ipairs(leaves) do
 		local ps = {}
 		for _, d in ipairs(m:GetDescendants()) do
-			if d:IsA("BasePart") then table.insert(ps, d) end
+			if d:IsA("BasePart") and (not allowed or allowed[d]) then table.insert(ps, d) end
 		end
 		local k = #ps
 		if k >= 2 and k <= 400 then
@@ -525,9 +573,21 @@ end
 -- Core QA scan over an instance (shared by handlers.qa and the build handler's auto-QA).
 -- Deliberately NOT a global: this file otherwise keeps every helper local, and a leaked
 -- global here could collide with another plugin's `qaScan`.
-local qaScan = function(inst, doFix)
-	local args = { fix = doFix }
-	local parts = partsOf(inst)
+local p4Region, p4InRegion
+
+local qaScan = function(inst, options)
+	local args = type(options) == "table" and options or { fix = options == true }
+	local allParts = partsOf(inst)
+	local region = args.region ~= nil and p4Region(args.region, "qa region") or nil
+	local parts, allowed = {}, nil
+	if region then
+		allowed = {}
+		for _, part in ipairs(allParts) do
+			if p4InRegion(part, region) then parts[#parts + 1] = part; allowed[part] = true end
+		end
+	else
+		parts = allParts
+	end
 	local n = #parts
 	local unanchored = {}
 	for _, p in ipairs(parts) do
@@ -543,6 +603,7 @@ local qaScan = function(inst, doFix)
 	end
 	local CAP = 1200
 	local duplicates, deepOverlaps, nearGaps, zFights, fitGaps = {}, {}, {}, {}, {}
+	local fitCandidates, connectedAssemblies = {}, {}
 	local zfFix = {} -- {part, axis, dir} pairs to nudge apart when args.fix
 	local seats = {} -- {part, move} floating pieces to auto-seat when args.fix
 	local ov = {}
@@ -564,6 +625,11 @@ local qaScan = function(inst, doFix)
 		end
 		return nil
 	end
+	local function connectAssemblies(a, b)
+		connectedAssemblies[a] = connectedAssemblies[a] or {}
+		connectedAssemblies[b] = connectedAssemblies[b] or {}
+		connectedAssemblies[a][b], connectedAssemblies[b][a] = true, true
+	end
 	if n <= CAP then
 		ov = realOverlaps(parts) -- rotation-correct real-overlap set; gates the AABB magnitude math
 		local AB = {}
@@ -577,7 +643,8 @@ local qaScan = function(inst, doFix)
 			for j = i + 1, n do
 				local b = parts[j]
 				local B = AB[j]
-				if args.fit and assemblyId(a) ~= assemblyId(b) then
+				local assemblyA, assemblyB = assemblyId(a), assemblyId(b)
+				if args.fit and assemblyA ~= assemblyB then
 						local sa, sb = slidingModel(a), slidingModel(b)
 						local intended = (sa and not b:IsDescendantOf(sa)) or (sb and not a:IsDescendantOf(sb))
 						if not intended then
@@ -585,12 +652,17 @@ local qaScan = function(inst, doFix)
 							local gy = math.min(A.c.Y + A.h.Y, B.c.Y + B.h.Y) - math.max(A.c.Y - A.h.Y, B.c.Y - B.h.Y)
 							local gz = math.min(A.c.Z + A.h.Z, B.c.Z + B.h.Z) - math.max(A.c.Z - A.h.Z, B.c.Z - B.h.Z)
 							local GMIN, GMAX, FACE = 0.03, 0.6, 0.5
+							if (gx >= -GMIN and gy > FACE and gz > FACE)
+								or (gy >= -GMIN and gx > FACE and gz > FACE)
+								or (gz >= -GMIN and gx > FACE and gy > FACE) then
+								connectAssemblies(assemblyA, assemblyB)
+							end
 							local axis, g
 							if gx < -GMIN and gx >= -GMAX and gy > FACE and gz > FACE then axis, g = "X", -gx
 							elseif gy < -GMIN and gy >= -GMAX and gx > FACE and gz > FACE then axis, g = "Y", -gy
 							elseif gz < -GMIN and gz >= -GMAX and gx > FACE and gy > FACE then axis, g = "Z", -gz end
-							if axis and #fitGaps < 25 then
-								table.insert(fitGaps, string.format("%s | %s — %.2f gap on %s (faces nearly meet but don't touch; butt them or close the gap)", a:GetFullName(), b:GetFullName(), g, axis))
+							if axis then
+								table.insert(fitCandidates, { a = assemblyA, b = assemblyB, text = string.format("%s | %s — %.2f gap on %s (faces nearly meet but don't touch; butt them or close the gap)", a:GetFullName(), b:GetFullName(), g, axis) })
 							end
 						end
 					end
@@ -652,8 +724,14 @@ local qaScan = function(inst, doFix)
 			end
 		end
 	end
+	for _, candidate in ipairs(fitCandidates) do
+		if #fitGaps >= 25 then break end
+		if not (connectedAssemblies[candidate.a] and connectedAssemblies[candidate.a][candidate.b]) then
+			table.insert(fitGaps, candidate.text)
+		end
+	end
 	-- disconnected pieces inside each built assembly (drawer front off its tray, handle off panel)
-	assemblyGaps(inst, nearGaps, ov, args.fix and seats or nil)
+	assemblyGaps(inst, nearGaps, ov, args.fix and seats or nil, allowed)
 	-- fix=true: nudge each z-fighting part 0.06 off the shared plane (one undo step). Capped: a model
 	-- with MANY coplanar pairs is densely detailed (leaf planks, greebles) where mass-nudging does more
 	-- harm than the flicker — report those instead of shoving 20+ parts around.
@@ -715,7 +793,7 @@ local qaScan = function(inst, doFix)
 	if seated > 0 then
 		table.insert(warnings, string.format("fix: seated %d floating part(s) into the model (re-run rbx_qa to confirm)", seated))
 	end
-	return {
+	local result = {
 		target = inst.Name,
 		parts = n,
 		bbox = { center = { center.X, center.Y, center.Z }, size = { size.X, size.Y, size.Z } },
@@ -729,6 +807,8 @@ local qaScan = function(inst, doFix)
 		seated = seated,
 		warnings = warnings,
 	}
+	if region then result.region = args.region end
+	return result
 end
 
 function handlers.qa(args)
@@ -736,7 +816,7 @@ function handlers.qa(args)
 	if not inst then
 		error("target not found: " .. tostring(args.target))
 	end
-	return qaScan(inst, args.fix)
+	return qaScan(inst, args)
 end
 
 -- insert a generated Open Cloud asset (from the local-gen pipeline) into the workspace,
@@ -1031,11 +1111,1238 @@ function handlers.describe(args)
 		error("target not found: " .. tostring(args.target))
 	end
 	local depth = math.clamp(math.floor(tonumber(args.depth) or 1), 0, 4)
-	return describeInst(inst, depth)
+	local result = describeInst(inst, depth)
+	result.path = inst:GetFullName()
+	result.isBasePart = inst:IsA("BasePart")
+	result.isModel = inst:IsA("Model")
+	result.hasGeometry = #partsOf(inst) > 0
+	return result
+end
+
+-- Flat full-fidelity part dump (pos+rotation+shape+color) for the three.js mirror
+-- viewer — feeds a free-camera local render instead of a Studio screenshot.
+function handlers.scene_dump(args)
+	local inst = findInst(args.target)
+	if not inst then
+		error("target not found: " .. tostring(args.target))
+	end
+	return sceneDump(inst, 800)
+end
+
+-- Phase 4 map/edit helpers. These stay in the handler module so the Node side can
+-- send already-validated data without adding another plugin module/edge.
+local function p4Number(value, label, low, high)
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		error(label .. " must be a number")
+	end
+	if low and value < low then error(label .. " must be >= " .. tostring(low)) end
+	if high and value > high then error(label .. " must be <= " .. tostring(high)) end
+	return value
+end
+
+local function p4Vec(value, label)
+	if type(value) ~= "table" or #value ~= 3 then error(label .. " must be [x,y,z]") end
+	return Vector3.new(
+		p4Number(value[1], label .. "[1]"),
+		p4Number(value[2], label .. "[2]"),
+		p4Number(value[3], label .. "[3]")
+	)
+end
+
+local function p4Array(value)
+	return { r1(value.X), r1(value.Y), r1(value.Z) }
+end
+
+p4Region = function(value, label)
+	if value == nil then return nil end
+	if type(value) ~= "table" then error(label .. " must be {min,max}, {center,size}, or {center,radius}") end
+	if value.min ~= nil or value.max ~= nil then
+		if value.min == nil or value.max == nil then error(label .. " needs both min and max") end
+		local minV, maxV = p4Vec(value.min, label .. ".min"), p4Vec(value.max, label .. ".max")
+		if minV.X > maxV.X or minV.Y > maxV.Y or minV.Z > maxV.Z then error(label .. ".min must not exceed max") end
+		return { kind = "box", min = minV, max = maxV }
+	elseif value.center ~= nil and value.size ~= nil then
+		local center, size = p4Vec(value.center, label .. ".center"), p4Vec(value.size, label .. ".size")
+		if size.X <= 0 or size.Y <= 0 or size.Z <= 0 then error(label .. ".size must be positive") end
+		return { kind = "box", min = center - size / 2, max = center + size / 2 }
+	elseif value.center ~= nil and value.radius ~= nil then
+		local center = p4Vec(value.center, label .. ".center")
+		local radius = p4Number(value.radius, label .. ".radius", 0.001, 100000)
+		return { kind = "sphere", center = center, radius = radius }
+	end
+	error(label .. " needs min/max, center/size, or center/radius")
+end
+
+p4InRegion = function(part, region)
+	if not region then return true end
+	local center, half = worldAABB(part)
+	if region.kind == "sphere" then
+		return (center - region.center).Magnitude <= region.radius + half.Magnitude
+	end
+	local lo, hi = center - half, center + half
+	return hi.X >= region.min.X and lo.X <= region.max.X
+		and hi.Y >= region.min.Y and lo.Y <= region.max.Y
+		and hi.Z >= region.min.Z and lo.Z <= region.max.Z
+end
+
+-- Read-only scoped map. sceneDump owns the 800-part serialization cap; this
+-- wrapper counts the complete scope and marks any omitted entries explicitly.
+function handlers.map(args)
+	args = args or {}
+	local root = findInst(args.target or "workspace")
+	if not root then error("map target not found: " .. tostring(args.target)) end
+	local cap = 800
+	if args.maxParts ~= nil then
+		cap = p4Number(args.maxParts, "map maxParts", 1, 800)
+		if math.floor(cap) ~= cap then error("map maxParts must be an integer") end
+	end
+	local lod = args.lod or "parts"
+	if lod ~= "parts" and lod ~= "bbox" then error("map lod must be 'parts' or 'bbox'") end
+	local region = p4Region(args.region, "map region")
+	local dump = sceneDump(root, cap, region and function(part)
+		return p4InRegion(part, region)
+	end or nil)
+	local total = dump.totalParts
+	local shown = lod == "parts" and dump.parts or {}
+	local center, size = bboxOf(root)
+	local result = {
+		target = root:GetFullName(),
+		lod = lod,
+		maxParts = cap,
+		totalParts = total,
+		dumped = #shown,
+		truncated = dump.truncated,
+		coverage = dump.coverage,
+		parts = shown,
+		bbox = { center = p4Array(center), size = p4Array(size) },
+	}
+	if lod == "bbox" then result.partsOmitted = true end
+	if not region and lod == "parts" then result.tree = dump.tree end
+	if region then result.region = args.region end
+	return result
+end
+
+-- rbx_view can frame the existing Studio camera or return frame coordinates for
+-- the official capture path. Luau does not claim to produce a screenshot.
+function handlers.view(args)
+	args = args or {}
+	local target = args.target or "workspace"
+	local view = tostring(args.view or "iso")
+	if not VIEW_DIRS[view] then error("view must be front, back, left, right, iso, or top") end
+	local zoom = args.zoom
+	if zoom ~= nil then zoom = p4Number(zoom, "view zoom", 0.01, 100) end
+	local mode = args.mode or "coords"
+	if mode ~= "coords" and mode ~= "frame" then error("view mode must be 'coords' or 'frame'") end
+	local angled = args.azimuth ~= nil or args.elevation ~= nil
+	local frame
+	if angled then
+		local azimuth = p4Number(args.azimuth or 0, "view azimuth", -3600, 3600)
+		local elevation = p4Number(args.elevation or 20, "view elevation", -89, 89)
+		local frameArgs = { target = target, azimuth = azimuth, elevation = elevation, zoom = zoom }
+		frame = (mode == "frame") and handlers.frame_dir(frameArgs) or handlers.frame_dir_coords(frameArgs)
+	else
+		local frameArgs = { target = target, view = view, zoom = zoom }
+		frame = (mode == "frame") and handlers.frame(frameArgs) or handlers.frame_coords(frameArgs)
+	end
+	local warnings = {}
+	if args.capture == true then table.insert(warnings, "capture is not available inside the Luau handler; use the official capture path") end
+	if args.angles ~= nil then
+		local angles = p4Number(args.angles, "view angles", 1, 32)
+		if math.floor(angles) ~= angles then error("view angles must be an integer") end
+		if angles > 1 then table.insert(warnings, "turntable capture is not available inside the Luau handler") end
+	end
+	for _, key in ipairs({ "isolate", "hide", "cutaway", "annotate", "contrast", "plan" }) do
+		if args[key] ~= nil then table.insert(warnings, "view option '" .. key .. "' is not composed by this handler") end
+	end
+	local out = {
+		status = (mode == "frame") and "framed" or "coordinates-only",
+		capture = false,
+		target = target,
+		view = view,
+		camera_position = frame.camera_position or frame.pos,
+		look_at_position = frame.look_at_position or frame.look,
+		field_of_view = frame.field_of_view or camera().FieldOfView,
+		size = frame.size,
+	}
+	if #warnings > 0 then out.warnings = warnings end
+	return out
+end
+
+local function p4AddTarget(out, inst, label)
+	if not (inst:IsA("Model") or inst:IsA("BasePart")) then error(label .. " targets must be Models or BaseParts") end
+	for i = #out, 1, -1 do
+		if out[i] == inst or inst:IsDescendantOf(out[i]) then return end
+		if out[i]:IsDescendantOf(inst) then table.remove(out, i) end
+	end
+	table.insert(out, inst)
+end
+
+-- Explicit targets or a deliberately scoped selector. An unfiltered workspace
+-- selector is rejected so a typo cannot move an entire place.
+local function p4BulkTargets(args, label)
+	if type(args) ~= "table" then error(label .. " args must be a table") end
+	if args.target ~= nil and (args.targets ~= nil or args.select ~= nil) then error(label .. " accepts target, targets, or select, not more than one") end
+	if args.targets ~= nil and args.select ~= nil then error(label .. " accepts targets or select, not both") end
+	local out = {}
+	local selection
+	if args.target ~= nil then
+		if type(args.target) ~= "string" then error(label .. " target must be a path/name") end
+		local inst = findInst(args.target)
+		if not inst then error(label .. " target not found: " .. tostring(args.target)) end
+		if inst == workspace then error(label .. " cannot target workspace directly") end
+		p4AddTarget(out, inst, label)
+	elseif args.targets ~= nil then
+		if type(args.targets) ~= "table" or #args.targets == 0 then error(label .. " targets must be a non-empty array") end
+		for _, name in ipairs(args.targets) do
+			if type(name) ~= "string" then error(label .. " target names must be strings") end
+			local inst = findInst(name)
+			if not inst then error(label .. " target not found: " .. name) end
+			if inst == workspace then error(label .. " cannot target workspace directly") end
+			p4AddTarget(out, inst, label)
+		end
+	elseif args.select ~= nil then
+		local sel = args.select
+		selection = sel
+		if type(sel) ~= "table" then error(label .. " select must be a table") end
+		local root = findInst(sel.root or "workspace")
+		if not root then error(label .. " select root not found: " .. tostring(sel.root)) end
+		local hasFilter = sel.name ~= nil or sel.class ~= nil or sel.tag ~= nil or sel.attr ~= nil
+		if root == workspace and not hasFilter then error(label .. " select needs a filter when root is workspace") end
+		local nameQ
+		if sel.name ~= nil then
+			if type(sel.name) ~= "string" or sel.name == "" then error(label .. " select.name must be non-empty") end
+			nameQ = string.lower(sel.name)
+		end
+		local class = sel.class
+		if class ~= nil then
+			if type(class) ~= "string" or class == "" then error(label .. " select.class must be a class name") end
+			local validClass = pcall(function() return game:IsA(class) end)
+			if not validClass then error(label .. " select.class is invalid: " .. class) end
+		end
+		if sel.tag ~= nil and (type(sel.tag) ~= "string" or sel.tag == "") then error(label .. " select.tag must be non-empty") end
+		local attrKey, attrValue
+		if sel.attr ~= nil then
+			if type(sel.attr) ~= "table" or type(sel.attr.key) ~= "string" or sel.attr.key == "" then error(label .. " select.attr needs key") end
+			attrKey, attrValue = sel.attr.key, sel.attr.value
+		end
+		local candidates = {}
+		if sel.tag then
+			for _, inst in ipairs(game:GetService("CollectionService"):GetTagged(sel.tag)) do table.insert(candidates, inst) end
+		else
+			if root:IsA("Model") or root:IsA("BasePart") then table.insert(candidates, root) end
+			for _, inst in ipairs(root:GetDescendants()) do table.insert(candidates, inst) end
+		end
+		for _, inst in ipairs(candidates) do
+			local ok = (root == workspace or inst == root or inst:IsDescendantOf(root))
+			if ok and nameQ then
+				local name = string.lower(inst.Name)
+				ok = sel.exact == true and name == nameQ or sel.exact ~= true and string.find(name, nameQ, 1, true) ~= nil
+			end
+			if ok and class then local okClass, isClass = pcall(function() return inst:IsA(class) end); ok = okClass and isClass end
+			if ok and attrKey then local value = inst:GetAttribute(attrKey); ok = attrValue == nil and value ~= nil or attrValue ~= nil and (value == attrValue or tostring(value) == tostring(attrValue)) end
+			if ok then p4AddTarget(out, inst, label) end
+		end
+	else
+		error(label .. " needs target, targets, or select")
+	end
+	if #out == 0 then error(label .. " matched no Model/BasePart targets") end
+	local limit = selection and selection.limit or args.limit or 500
+	limit = p4Number(limit, label .. " limit", 1, 500)
+	if math.floor(limit) ~= limit then error(label .. " limit must be an integer") end
+	if #out > limit then error(label .. " matched " .. tostring(#out) .. " targets over limit " .. tostring(limit)) end
+	table.sort(out, function(a, b) return a:GetFullName() < b:GetFullName() end)
+	return out
+end
+
+local function p4Pivot(inst)
+	if inst:IsA("Model") then return inst:GetPivot() end
+	return inst.CFrame
+end
+
+local function p4Place(inst, cf)
+	if inst:IsA("Model") then inst:PivotTo(cf) else inst.CFrame = cf end
+end
+
+function handlers.replace(args)
+	args = args or {}
+	local templateName = args.template or args.with
+	if type(templateName) ~= "string" or templateName == "" then error("replace needs template") end
+	local template = findInst(templateName)
+	if not template or not (template:IsA("Model") or template:IsA("BasePart")) or #partsOf(template) == 0 then error("replace template must be a Model or BasePart with geometry") end
+	local targets = p4BulkTargets(args, "replace")
+	for _, inst in ipairs(targets) do
+		if inst == template or inst:IsDescendantOf(template) or template:IsDescendantOf(inst) then error("replace template cannot overlap a replacement target") end
+	end
+	return recorded("BuildKit replace", function()
+		local items = {}
+		for _, old in ipairs(targets) do
+			local clone = old and template:Clone()
+			if not clone then error("replace could not clone template") end
+			local cf, parent, oldPath = p4Pivot(old), old.Parent, old:GetFullName()
+			clone.Name = old.Name
+			clone.Parent = parent
+			p4Place(clone, cf)
+			old.Parent = nil -- keep the old instance recoverable by Studio undo
+			table.insert(items, { old = oldPath, new = clone:GetFullName() })
+		end
+		return { verb = "replace", count = #items, items = items }
+	end)
+end
+
+local function p4Next(state)
+	state = (state * 1103515245 + 12345) % 2147483648
+	return state, state / 2147483648
+end
+
+local function p4Sample(region, state)
+	if region.kind == "sphere" then
+		for _ = 1, 12 do
+			local x, y, z
+			state, x = p4Next(state); state, y = p4Next(state); state, z = p4Next(state)
+			x, y, z = x * 2 - 1, y * 2 - 1, z * 2 - 1
+			if x * x + y * y + z * z <= 1 then return region.center + Vector3.new(x, y, z) * region.radius, state end
+		end
+		return region.center, state
+	end
+	local x, y, z
+	state, x = p4Next(state); state, y = p4Next(state); state, z = p4Next(state)
+	return Vector3.new(
+		region.min.X + (region.max.X - region.min.X) * x,
+		region.min.Y + (region.max.Y - region.min.Y) * y,
+		region.min.Z + (region.max.Z - region.min.Z) * z
+	), state
+end
+
+local PLACEMENT_CAP = 500
+local function p4Count(value, label, default)
+	if value == nil then value = default end
+	value = p4Number(value, label, 1)
+	if math.floor(value) ~= value then error(label .. " must be an integer") end
+	return value
+end
+
+local function p4Cap(value, label)
+	if value > PLACEMENT_CAP then
+		error(label .. " computed " .. tostring(value) .. " instances; maximum is " .. tostring(PLACEMENT_CAP))
+	end
+	return value
+end
+
+local function p4Seed(value, label, required)
+	if value == nil then
+		if required then error(label .. " is required for deterministic placement") end
+		return 1
+	end
+	value = p4Number(value, label)
+	if math.floor(value) ~= value then error(label .. " must be an integer") end
+	value = value % 2147483647
+	if value == 0 then value = 1 end
+	return value
+end
+
+local function p4Jitter(value, label)
+	if value == nil then return Vector3.new(0, 0, 0) end
+	local jitter
+	if type(value) == "number" then
+		local j = p4Number(value, label, 0, 100000)
+		jitter = Vector3.new(j, j, j)
+	else
+		jitter = p4Vec(value, label)
+	end
+	if jitter.X < 0 or jitter.Y < 0 or jitter.Z < 0 then error(label .. " must be non-negative") end
+	return jitter
+end
+
+local function p4Snap(value, step)
+	if not step then return value end
+	local function round(number)
+		return number < 0 and math.ceil(number - 0.5) or math.floor(number + 0.5)
+	end
+	return Vector3.new(
+		round(value.X / step) * step,
+		round(value.Y / step) * step,
+		round(value.Z / step) * step
+	)
+end
+
+local function p4Palette()
+	local palette = workspace:FindFirstChild("Palette")
+	if not palette or not palette:IsA("Folder") then error("place requires Workspace.Palette Folder") end
+	return palette
+end
+
+local function p4PaletteNames(palette)
+	local names = {}
+	for _, child in ipairs(palette:GetChildren()) do names[#names + 1] = child.Name end
+	table.sort(names)
+	return names
+end
+
+local function p4PalettePrefab(palette, name)
+	if type(name) ~= "string" or name == "" then error("place needs prefab") end
+	local prefab = palette:FindFirstChild(name)
+	if not prefab then
+		local names = p4PaletteNames(palette)
+		error("unknown prefab '" .. name .. "'; Palette contains: " .. (#names > 0 and table.concat(names, ", ") or "<none>"))
+	end
+	if not (prefab:IsA("Model") or prefab:IsA("BasePart")) or #partsOf(prefab) == 0 then
+		error("prefab '" .. name .. "' must be a Model or BasePart with geometry")
+	end
+	return prefab
+end
+
+local function p4PaletteManifest(palette)
+	local manifest = {}
+	for _, child in ipairs(palette:GetChildren()) do
+		if (child:IsA("Model") or child:IsA("BasePart")) and #partsOf(child) > 0 then
+			local center, size = bboxOf(child)
+			local pivot = p4Pivot(child)
+			manifest[#manifest + 1] = {
+				name = child.Name,
+				size = p4Array(size),
+				pivotY = r1((center.Y - size.Y / 2) - pivot.Position.Y),
+			}
+		end
+	end
+	table.sort(manifest, function(a, b) return a.name < b.name end)
+	return manifest
+end
+
+local function p4GroundTarget(value, label)
+	if value == nil then return nil end
+	if type(value) ~= "string" or value == "" then error(label .. " must be an instance path or name") end
+	local target = findInst(value)
+	if not target then error(label .. " not found: " .. value) end
+	if not target:IsA("BasePart") and not target:IsA("Model") then
+		error(label .. " must be a BasePart or Model")
+	end
+	if #partsOf(target) == 0 then error(label .. " must contain geometry") end
+	return target
+end
+
+local function p4PlacementSpec(args)
+	if args.verb ~= nil then
+		local verb = string.lower(tostring(args.verb))
+		if verb ~= "place" and verb ~= "line" and verb ~= "grid" and verb ~= "ring" and verb ~= "scatter" then
+			error("place unknown verb: " .. tostring(args.verb))
+		end
+		local spec = args[verb]
+		return verb, type(spec) == "table" and spec or args
+	end
+	local found, verb = 0, nil
+	for _, key in ipairs({ "place", "at", "line", "grid", "ring", "scatter" }) do
+		if args[key] ~= nil then
+			found += 1
+			verb = key == "at" and "place" or key
+		end
+	end
+	if found == 0 then error("place needs one shape: at, line, grid, ring, or scatter") end
+	if found > 1 then error("place accepts one shape only") end
+	local spec = args[verb]
+	if verb == "place" and spec == nil then spec = args end
+	if type(spec) ~= "table" then error("place " .. verb .. " must be a table") end
+	return verb, spec
+end
+
+local function p4FlatTangent(tangent)
+	local flat = Vector3.new(tangent.X, 0, tangent.Z)
+	if flat.Magnitude < 0.0001 then return Vector3.new(0, 0, -1) end
+	return flat
+end
+
+local function p4PlacementRun(args, source, legacy, placementRoot, resolvedGroundTarget)
+	local verb, spec
+	if legacy then
+		verb, spec = "scatter", args
+	else
+		verb, spec = p4PlacementSpec(args)
+	end
+	if args.abut ~= nil and type(args.abut) ~= "boolean" then error("place abut must be a boolean") end
+	local abut = args.abut == true
+	if abut and verb ~= "line" and verb ~= "grid" then error("place abut only supports line or grid") end
+	local _, prefabSize = bboxOf(source)
+	local seedRequired = not legacy and (verb == "scatter" or args.jitter ~= nil)
+	local seed = p4Seed(args.seed, legacy and "scatter seed" or "place seed", seedRequired)
+	local state = seed
+	local jitter = p4Jitter(args.jitter, legacy and "scatter jitter" or "place jitter")
+	local snap
+	if args.snap ~= nil then snap = p4Number(args.snap, "place snap", 0.001, 100000) end
+	if args.ground ~= nil and type(args.ground) ~= "boolean" then error("place ground must be a boolean") end
+	local doGround = args.ground == true
+	local groundTarget = resolvedGroundTarget
+	if doGround and not groundTarget and args.groundTarget ~= nil then
+		groundTarget = p4GroundTarget(args.groundTarget, "place groundTarget")
+	end
+	local rotate = string.lower(tostring(args.rotate or "none"))
+	if rotate ~= "none" and rotate ~= "random" and rotate ~= "align" then error("place rotate must be none, random, or align") end
+	if rotate == "align" and verb ~= "line" and verb ~= "ring" then error("place rotate=align needs line or ring") end
+	local rotationValue = spec.rotation or args.rotation
+	local extraRotation = CFrame.new()
+	if rotationValue ~= nil then
+		local rotation = p4Vec(rotationValue, "place rotation")
+		extraRotation = CFrame.Angles(math.rad(rotation.X), math.rad(rotation.Y), math.rad(rotation.Z))
+	end
+
+	local plans = {}
+	local function addPlan(pos, tangent, row, col)
+		plans[#plans + 1] = { pos = pos, tangent = tangent, row = row, col = col }
+	end
+	if verb == "place" then
+		addPlan(p4Vec(spec.at, "place at"), nil)
+	elseif verb == "line" then
+		local from = p4Vec(spec.from, "place line from")
+		local to = p4Vec(spec.to, "place line to")
+		local via = spec.via ~= nil and p4Vec(spec.via, "place line via") or nil
+		if abut and via then error("place line abut does not support via") end
+		if spec.spacing ~= nil and spec.count ~= nil then error("place line needs spacing or count, not both") end
+		if abut and (spec.spacing ~= nil or spec.count ~= nil) then error("place line abut cannot include spacing or count") end
+		if not abut and spec.spacing == nil and spec.count == nil then error("place line needs spacing or count") end
+		local count, abutSpacing, distance = nil, nil, (to - from).Magnitude
+		if abut then
+			if distance < 0.0001 then error("place line abut needs distinct endpoints") end
+			local axis = (to - from).Unit
+			abutSpacing = math.abs(axis.X) * prefabSize.X + math.abs(axis.Y) * prefabSize.Y + math.abs(axis.Z) * prefabSize.Z
+			if abutSpacing < 0.001 then error("place line prefab has no usable extent") end
+			count = math.ceil(distance / abutSpacing) + 1
+			p4Cap(count, "place line")
+		elseif spec.spacing ~= nil then
+			local spacing = p4Number(spec.spacing, "place line spacing", 0.001, 100000)
+			count = math.ceil(distance / spacing) + 1
+			p4Cap(count, "place line")
+		else
+			count = p4Count(spec.count, "place line count")
+			p4Cap(count, "place line")
+		end
+		local function pointAt(t)
+			if via then
+				local u = 1 - t
+				return from * (u * u) + via * (2 * u * t) + to * (t * t)
+			end
+			return from + (to - from) * t
+		end
+		local function tangentAt(t)
+			local tangent = via and ((via - from) * (2 * (1 - t)) + (to - via) * (2 * t)) or (to - from)
+			return tangent.Magnitude > 0.0001 and tangent or (to - from)
+		end
+		for i = 1, count do
+			local t = abut and math.min((i - 1) * abutSpacing / distance, 1) or (count == 1 and 0 or (i - 1) / (count - 1))
+			addPlan(pointAt(t), tangentAt(t), 1, i)
+		end
+	elseif verb == "grid" then
+		local origin = p4Vec(spec.origin, "place grid origin")
+		local rows = p4Count(spec.rows, "place grid rows")
+		local cols = p4Count(spec.cols, "place grid cols")
+		p4Cap(rows * cols, "place grid")
+		if abut and (spec.spacingX ~= nil or spec.spacingZ ~= nil) then error("place grid abut cannot include spacingX or spacingZ") end
+		if not abut and (spec.spacingX == nil or spec.spacingZ == nil) then error("place grid needs spacingX and spacingZ") end
+		local spacingX = abut and prefabSize.X or p4Number(spec.spacingX, "place grid spacingX", 0.001, 100000)
+		local spacingZ = abut and prefabSize.Z or p4Number(spec.spacingZ, "place grid spacingZ", 0.001, 100000)
+		for row = 0, rows - 1 do
+			for col = 0, cols - 1 do
+				addPlan(origin + Vector3.new(col * spacingX, 0, row * spacingZ), nil, row + 1, col + 1)
+			end
+		end
+	elseif verb == "ring" then
+		local center = p4Vec(spec.center, "place ring center")
+		local radius = p4Number(spec.radius, "place ring radius", 0.001, 100000)
+		local count = p4Count(spec.count, "place ring count")
+		p4Cap(count, "place ring")
+		local startAngle = p4Number(spec.startAngle or 0, "place ring startAngle")
+		for i = 1, count do
+			local angle = math.rad(startAngle + (i - 1) * 360 / count)
+			addPlan(
+				center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius),
+				Vector3.new(-math.sin(angle), 0, math.cos(angle))
+			)
+		end
+	else
+		local region = p4Region(spec.region, "place scatter region")
+		if not region then error("place scatter needs region") end
+		local count = p4Count(spec.count, "place scatter count", 10)
+		p4Cap(count, "place scatter")
+		for _ = 1, count do
+			local pos
+			pos, state = p4Sample(region, state)
+			addPlan(pos, nil)
+		end
+	end
+	p4Cap(#plans, "place")
+
+	local parent, groupName
+	if legacy then
+		parent = args.parent and findInst(args.parent) or source.Parent
+		if not parent or not (parent == workspace or parent:IsDescendantOf(workspace)) then error("scatter parent must be inside Workspace") end
+	else
+		groupName = args.name
+		if groupName == nil then groupName = source.Name .. "s" end
+		if type(groupName) ~= "string" or groupName == "" then error("place name must be a non-empty string") end
+	end
+	local maxDistance = doGround and p4Number(args.maxDistance or 1000, "place maxDistance", 0.1, 100000) or 0
+	local offset = doGround and p4Number(args.offset or 0, "place offset", -100000, 100000) or 0
+	local baseRotation = p4Pivot(source).Rotation
+	local recordingName = legacy and "BuildKit scatter" or "BuildKit place " .. groupName
+	return recorded(recordingName, function()
+		local group
+		if not legacy then
+			local placements = placementRoot or workspace:FindFirstChild("Placements")
+			if placements and not placements:IsA("Folder") then error("placement root must be a Folder") end
+			if not placements then
+				placements = Instance.new("Folder")
+				placements.Name = "Placements"
+				placements.Parent = workspace
+			end
+			group = Instance.new("Model")
+			group.Name = groupName
+			group.Parent = placements
+			parent = group
+		end
+		local items, names, placedByPlan, skipped = {}, {}, {}, 0
+		for i, plan in ipairs(plans) do
+			local pos = plan.pos
+			if verb == "scatter" or args.jitter ~= nil or legacy then
+				local jx, jy, jz
+				state, jx = p4Next(state); state, jy = p4Next(state); state, jz = p4Next(state)
+				pos += Vector3.new((jx * 2 - 1) * jitter.X, (jy * 2 - 1) * jitter.Y, (jz * 2 - 1) * jitter.Z)
+			end
+			pos = p4Snap(pos, snap)
+			local orientation = baseRotation
+			if rotate == "align" then
+				orientation = CFrame.lookAt(Vector3.new(0, 0, 0), p4FlatTangent(plan.tangent)).Rotation * orientation
+			elseif rotate == "random" then
+				local yaw
+				state, yaw = p4Next(state)
+				orientation = CFrame.Angles(0, yaw * math.pi * 2, 0) * orientation
+			end
+			orientation = orientation * extraRotation
+			local clone = source:Clone()
+			if not clone then error((legacy and "scatter" or "place") .. " could not clone prefab") end
+			if not legacy then clone.Name = source.Name .. "_" .. string.format("%03d", i) end
+			clone.Parent = parent
+			p4Place(clone, CFrame.new(pos) * orientation)
+			if doGround then
+				local params = RaycastParams.new()
+				if groundTarget then
+					params.FilterType = Enum.RaycastFilterType.Include
+					params.FilterDescendantsInstances = { groundTarget }
+				else
+					params.FilterType = Enum.RaycastFilterType.Exclude
+					params.FilterDescendantsInstances = { legacy and clone or group }
+				end
+				params.IgnoreWater = true
+				local center, size = bboxOf(clone)
+				local hit = workspace:Raycast(center + Vector3.new(0, size.Y / 2 + 0.05, 0), Vector3.new(0, -maxDistance, 0), params)
+				if hit then
+					local delta = hit.Position.Y + offset - (center.Y - size.Y / 2)
+					if math.abs(delta) > 0.001 then pivotWorld(clone, CFrame.new(0, delta, 0)) end
+				else
+					skipped += 1
+					clone:Destroy()
+				end
+			end
+			if clone.Parent then
+				placedByPlan[i] = clone
+				if legacy then
+					items[#items + 1] = { path = clone:GetFullName(), pos = p4Array(pos) }
+				else
+					names[#names + 1] = clone.Name
+				end
+			end
+		end
+		if legacy then return { verb = "scatter", count = #items, items = items, seed = seed } end
+		local center, size
+		if #names > 0 then
+			center, size = bboxOf(group)
+		else
+			center, size = Vector3.new(0, 0, 0), Vector3.new(0, 0, 0)
+		end
+		local sample = {}
+		if names[1] then sample[1] = names[1] end
+		if #names > 1 then sample[2] = names[#names] end
+		local result = {
+			verb = verb,
+			prefab = source.Name,
+			placed = #names,
+			skipped = skipped,
+			group = (placementRoot and placementRoot.Name or "Placements") .. "/" .. groupName,
+			bounds = { center = p4Array(center), size = p4Array(size) },
+			sample = sample,
+		}
+		local gaps = {}
+		local function checkGap(a, b)
+			if not a or not b then return end
+			local ac, aSize = bboxOf(a)
+			local bc, bSize = bboxOf(b)
+			local dx = math.max(0, math.abs(ac.X - bc.X) - (aSize.X + bSize.X) / 2)
+			local dy = math.max(0, math.abs(ac.Y - bc.Y) - (aSize.Y + bSize.Y) / 2)
+			local dz = math.max(0, math.abs(ac.Z - bc.Z) - (aSize.Z + bSize.Z) / 2)
+			local gap = math.sqrt(dx * dx + dy * dy + dz * dz)
+			if gap > 0.1 and #gaps < 25 then gaps[#gaps + 1] = { from = a.Name, to = b.Name, gap = r1(gap) } end
+		end
+		if verb == "line" then
+			for i = 2, #plans do checkGap(placedByPlan[i - 1], placedByPlan[i]) end
+		elseif verb == "grid" then
+			local cols = p4Count(spec.cols, "place grid cols")
+			for i, plan in ipairs(plans) do
+				if plan.col > 1 then checkGap(placedByPlan[i - 1], placedByPlan[i]) end
+				if plan.row > 1 then checkGap(placedByPlan[i - cols], placedByPlan[i]) end
+			end
+		end
+		result.gaps = gaps
+		if abut then result.abut = true end
+		if verb == "scatter" or args.jitter ~= nil or rotate == "random" then result.seed = seed end
+		if groundTarget then result.groundTarget = groundTarget:GetFullName() end
+		if skipped > 0 then result.reason = "no ground hit" end
+		return result
+	end)
+end
+
+function handlers.place(args)
+	args = args or {}
+	local palette = p4Palette()
+	if args.mode == "palette" then return { mode = "palette", manifest = p4PaletteManifest(palette) } end
+	return p4PlacementRun(args, p4PalettePrefab(palette, args.prefab), false)
+end
+
+-- Declarative map files own only MapPlacements. Each rule is rebuilt under a stable
+-- Map_<file>_<id> group, so a second apply replaces the file's result instead of
+-- accumulating copies or touching user-owned Workspace.Placements.
+-- ponytail: full rebuild per map file keeps ownership and one-step undo simple; add
+-- per-rule mutation only when map size makes the rebuild measurable.
+function handlers.map_apply(args)
+	args = args or {}
+	local mapName = args.map
+	if type(mapName) ~= "string" or not string.match(mapName, "^[A-Za-z0-9][A-Za-z0-9_.-]*$") then
+		error("map_apply needs a safe map file name")
+	end
+	local rules = args.rules
+	if type(rules) ~= "table" then error("map_apply needs rules") end
+	if #rules > 256 then error("map_apply is capped at 256 rules") end
+	local palette = nil
+	if #rules > 0 then palette = p4Palette() end
+	local prefix = "Map_" .. mapName .. "_"
+	local sources = {}
+	local ids = {}
+	local hasGround = false
+	for _, rule in ipairs(rules) do
+		if type(rule) ~= "table" then error("map_apply rule must be a table") end
+		local id = rule.id
+		if type(id) ~= "string" or not string.match(id, "^[A-Za-z0-9][A-Za-z0-9_.:-]*$") then
+			error("map_apply rule id must be safe")
+		end
+		if ids[id] then error("map_apply duplicate rule id: " .. id) end
+		ids[id] = true
+		p4PlacementSpec(rule) -- validate the one-verb contract before changing the map
+		if rule.ground == true then hasGround = true end
+		sources[#sources + 1] = { rule = rule, source = p4PalettePrefab(palette, rule.prefab) }
+	end
+	local groundTarget = hasGround and p4GroundTarget(args.groundTarget, "map groundTarget") or nil
+	return recorded("BuildKit map " .. mapName, function()
+		local root = workspace:FindFirstChild("MapPlacements")
+		if root and not root:IsA("Folder") then error("Workspace.MapPlacements must be a Folder") end
+		if not root then
+			root = Instance.new("Folder")
+			root.Name = "MapPlacements"
+			root.Parent = workspace
+		end
+		local removed = 0
+		for _, child in ipairs(root:GetChildren()) do
+			if string.sub(child.Name, 1, #prefix) == prefix then
+				child.Parent = nil -- keep removed groups recoverable by Studio undo
+				removed += 1
+			end
+		end
+		local placements = {}
+		for _, item in ipairs(sources) do
+			local placementArgs = {}
+			for key, value in pairs(item.rule) do
+				if key ~= "id" and key ~= "name" and key ~= "groundTarget" then placementArgs[key] = value end
+			end
+			placementArgs.name = prefix .. item.rule.id
+			placements[#placements + 1] = p4PlacementRun(placementArgs, item.source, false, root, groundTarget)
+		end
+		local result = { map = mapName, rules = #sources, removed = removed, placements = placements, group = "MapPlacements/" .. prefix }
+		if groundTarget then result.groundTarget = groundTarget:GetFullName() end
+		return result
+	end)
+end
+
+function handlers.scatter(args)
+	args = args or {}
+	local templateName = args.template or args.target
+	if type(templateName) ~= "string" or templateName == "" then error("scatter needs template") end
+	local template = findInst(templateName)
+	if not template or not (template:IsA("Model") or template:IsA("BasePart")) or #partsOf(template) == 0 then error("scatter template must be a Model or BasePart with geometry") end
+	return p4PlacementRun(args, template, true)
+end
+
+function handlers.distribute(args)
+	args = args or {}
+	local from = p4Vec(args.from or args.start or args.a, "distribute from")
+	local to = p4Vec(args.to or args.finish or args.b, "distribute to")
+	local targets = p4BulkTargets(args, "distribute")
+	if #targets < 2 then error("distribute needs at least two targets") end
+	-- Optional `via` control point turns the straight run into a quadratic Bezier, so a
+	-- fence/lamp line can follow a curved path instead of only a straight one.
+	local via = args.via ~= nil and p4Vec(args.via, "distribute via") or nil
+	return recorded("BuildKit distribute", function()
+		local items = {}
+		for i, inst in ipairs(targets) do
+			local t = (i - 1) / (#targets - 1)
+			local desired
+			if via then
+				local u = 1 - t
+				desired = from * (u * u) + via * (2 * u * t) + to * (t * t)
+			else
+				desired = from + (to - from) * t
+			end
+			local center = bboxOf(inst)
+			pivotWorld(inst, CFrame.new(desired - center))
+			table.insert(items, { path = inst:GetFullName(), pos = p4Array(desired) })
+		end
+		return { verb = "distribute", count = #items, items = items }
+	end)
+end
+
+function handlers.align(args)
+	args = args or {}
+	local axis = string.lower(tostring(args.axis or ""))
+	if axis ~= "x" and axis ~= "y" and axis ~= "z" then error("align axis must be x, y, or z") end
+	local mode = args.mode or "center"
+	if mode ~= "center" and mode ~= "min" and mode ~= "max" then error("align mode must be center, min, or max") end
+	local value = args.value
+	if value == nil then
+		if not args.reference then error("align needs value or reference") end
+		local reference = findInst(args.reference)
+		if not reference then error("align reference not found: " .. tostring(args.reference)) end
+		value = bboxOf(reference)
+		value = (axis == "x" and value.X) or (axis == "y" and value.Y) or value.Z
+	end
+	value = p4Number(value, "align value")
+	local targets = p4BulkTargets(args, "align")
+	return recorded("BuildKit align", function()
+		local items = {}
+		for _, inst in ipairs(targets) do
+			local center, size = bboxOf(inst)
+			local current = (axis == "x" and center.X) or (axis == "y" and center.Y) or center.Z
+			local half = (axis == "x" and size.X) or (axis == "y" and size.Y) or size.Z
+			local desired = mode == "min" and value + half / 2 or mode == "max" and value - half / 2 or value
+			local delta = desired - current
+			local move = (axis == "x" and Vector3.new(delta, 0, 0)) or (axis == "y" and Vector3.new(0, delta, 0)) or Vector3.new(0, 0, delta)
+			pivotWorld(inst, CFrame.new(move))
+			table.insert(items, { path = inst:GetFullName(), pos = p4Array(bboxOf(inst)) })
+		end
+		return { verb = "align", axis = axis, mode = mode, count = #items, items = items }
+	end)
+end
+
+function handlers.ground(args)
+	args = args or {}
+	local targets = p4BulkTargets(args, "ground")
+	local maxDistance = p4Number(args.maxDistance or 1000, "ground maxDistance", 0.1, 100000)
+	local offset = p4Number(args.offset or 0, "ground offset", -100000, 100000)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = targets
+	params.IgnoreWater = true
+	local moves, skipped = {}, {}
+	for _, inst in ipairs(targets) do
+		local center, size = bboxOf(inst)
+		local hit = workspace:Raycast(center + Vector3.new(0, size.Y / 2 + 0.05, 0), Vector3.new(0, -maxDistance, 0), params)
+		if hit then
+			local delta = hit.Position.Y + offset - (center.Y - size.Y / 2)
+			if math.abs(delta) > 0.001 then table.insert(moves, { inst = inst, delta = delta, hit = hit.Position.Y }) end
+		else
+			table.insert(skipped, inst:GetFullName())
+		end
+	end
+	if #moves == 0 then
+		return { verb = "ground", moved = 0, skipped = #skipped, skippedTargets = skipped, warnings = { "no selected target intersected a downward ray" } }
+	end
+	return recorded("BuildKit ground", function()
+		local items = {}
+		for _, move in ipairs(moves) do
+			pivotWorld(move.inst, CFrame.new(0, move.delta, 0))
+			table.insert(items, { path = move.inst:GetFullName(), deltaY = r1(move.delta), groundY = r1(move.hit) })
+		end
+		local result = { verb = "ground", moved = #items, skipped = #skipped, items = items }
+		if #skipped > 0 then result.skippedTargets = skipped; result.warnings = { "some targets had no ground hit and were left unchanged" } end
+		return result
+	end)
+end
+
+-- ---------- terrain ----------------------------------------------------------
+-- Roblox Terrain is a voxel system entirely separate from BaseParts. BuildKit had NO
+-- terrain surface at all (only skip-guards), so every landscape/water job fell back to
+-- raw execute_luau. Terrain voxels are on a 4-stud grid — hence ExpandToGrid(4) and the
+-- fixed resolution of 4 that FillRegion/ReplaceMaterial require.
+local TERRAIN_MATERIALS = {
+	air = Enum.Material.Air, water = Enum.Material.Water, grass = Enum.Material.Grass,
+	sand = Enum.Material.Sand, rock = Enum.Material.Rock, slate = Enum.Material.Slate,
+	concrete = Enum.Material.Concrete, brick = Enum.Material.Brick, sandstone = Enum.Material.Sandstone,
+	mud = Enum.Material.Mud, basalt = Enum.Material.Basalt, ground = Enum.Material.Ground,
+	crackedlava = Enum.Material.CrackedLava, asphalt = Enum.Material.Asphalt,
+	cobblestone = Enum.Material.Cobblestone, ice = Enum.Material.Ice, leafygrass = Enum.Material.LeafyGrass,
+	salt = Enum.Material.Salt, limestone = Enum.Material.Limestone, pavement = Enum.Material.Pavement,
+	snow = Enum.Material.Snow, woodplanks = Enum.Material.WoodPlanks,
+}
+
+local function terrainMaterial(name, default)
+	if name == nil then return default end
+	local key = (string.gsub(string.lower(tostring(name)), "[%s_%-]", ""))
+	local mat = TERRAIN_MATERIALS[key]
+	if not mat then
+		local names = {}
+		for k in pairs(TERRAIN_MATERIALS) do table.insert(names, k) end
+		table.sort(names)
+		error("unknown terrain material '" .. tostring(name) .. "' — valid: " .. table.concat(names, ", "))
+	end
+	return mat
+end
+
+local function terrainRegion(args, label)
+	local a = p4Vec(args.min, label .. " min")
+	local b = p4Vec(args.max, label .. " max")
+	local lo = Vector3.new(math.min(a.X, b.X), math.min(a.Y, b.Y), math.min(a.Z, b.Z))
+	local hi = Vector3.new(math.max(a.X, b.X), math.max(a.Y, b.Y), math.max(a.Z, b.Z))
+	return Region3.new(lo, hi):ExpandToGrid(4)
+end
+
+local function terrainCFrame(args, label)
+	local center = p4Vec(args.center, label .. " center")
+	local rot = args.rotation
+	if rot == nil then return CFrame.new(center) end
+	local r = p4Vec(rot, label .. " rotation")
+	return CFrame.new(center) * CFrame.Angles(math.rad(r.X), math.rad(r.Y), math.rad(r.Z))
+end
+
+function handlers.terrain(args)
+	args = args or {}
+	local terrain = workspace.Terrain
+	if not terrain then error("workspace has no Terrain object") end
+	local mode = string.lower(tostring(args.mode or "fill"))
+
+	if mode == "clear" then
+		return recorded("BuildKit terrain clear", function()
+			if args.min ~= nil or args.max ~= nil then
+				local region = terrainRegion(args, "terrain clear")
+				terrain:FillRegion(region, 4, Enum.Material.Air)
+				return { mode = "clear", scope = "region", min = p4Array(region.CFrame.Position - region.Size / 2), max = p4Array(region.CFrame.Position + region.Size / 2) }
+			end
+			terrain:Clear()
+			return { mode = "clear", scope = "all" }
+		end)
+	end
+
+	if mode == "paint" or mode == "replace" then
+		local region = terrainRegion(args, "terrain paint")
+		local from = terrainMaterial(args.from, nil)
+		local to = terrainMaterial(args.to or args.material, nil)
+		if not from or not to then error("terrain paint needs `from` and `to` materials") end
+		return recorded("BuildKit terrain paint", function()
+			terrain:ReplaceMaterial(region, 4, from, to)
+			return { mode = "paint", from = from.Name, to = to.Name }
+		end)
+	end
+
+	if mode ~= "fill" then error("terrain mode must be fill, clear, or paint") end
+
+	local material = terrainMaterial(args.material, Enum.Material.Grass)
+	local shape = string.lower(tostring(args.shape or "block"))
+	return recorded("BuildKit terrain fill", function()
+		if shape == "ball" then
+			local center = p4Vec(args.center, "terrain center")
+			local radius = p4Number(args.radius, "terrain radius", 0.1, 2048)
+			terrain:FillBall(center, radius, material)
+			return { mode = "fill", shape = "ball", material = material.Name, center = p4Array(center), radius = r1(radius) }
+		elseif shape == "cylinder" then
+			local height = p4Number(args.height, "terrain height", 0.1, 4096)
+			local radius = p4Number(args.radius, "terrain radius", 0.1, 2048)
+			terrain:FillCylinder(terrainCFrame(args, "terrain"), height, radius, material)
+			return { mode = "fill", shape = "cylinder", material = material.Name, height = r1(height), radius = r1(radius) }
+		elseif shape == "wedge" then
+			local size = p4Vec(args.size, "terrain size")
+			terrain:FillWedge(terrainCFrame(args, "terrain"), size, material)
+			return { mode = "fill", shape = "wedge", material = material.Name, size = p4Array(size) }
+		elseif shape == "region" then
+			local region = terrainRegion(args, "terrain fill")
+			terrain:FillRegion(region, 4, material)
+			return { mode = "fill", shape = "region", material = material.Name, size = p4Array(region.Size) }
+		end
+		local size = p4Vec(args.size, "terrain size")
+		terrain:FillBlock(terrainCFrame(args, "terrain"), size, material)
+		return { mode = "fill", shape = "block", material = material.Name, size = p4Array(size) }
+	end)
+end
+
+-- ---------- collision groups --------------------------------------------------
+-- Lets scenery stop blocking NPCs (or vice versa) without deleting collision entirely.
+function handlers.collision(args)
+	args = args or {}
+	local PhysicsService = game:GetService("PhysicsService")
+	local mode = string.lower(tostring(args.mode or "list"))
+
+	if mode == "list" then
+		local groups = {}
+		local ok, registered = pcall(function() return PhysicsService:GetRegisteredCollisionGroups() end)
+		if ok and type(registered) == "table" then
+			for _, g in ipairs(registered) do table.insert(groups, g.name or tostring(g)) end
+		end
+		return { mode = "list", count = #groups, groups = groups }
+	end
+
+	local name = args.name and tostring(args.name) or nil
+	if mode == "create" then
+		if not name then error("collision create needs a name") end
+		return recorded("BuildKit collision group", function()
+			PhysicsService:RegisterCollisionGroup(name)
+			return { mode = "create", name = name }
+		end)
+	end
+	if mode == "delete" then
+		if not name then error("collision delete needs a name") end
+		return recorded("BuildKit collision group", function()
+			PhysicsService:UnregisterCollisionGroup(name)
+			return { mode = "delete", name = name }
+		end)
+	end
+	if mode == "collidable" then
+		local other = args.other and tostring(args.other) or nil
+		if not name or not other then error("collision collidable needs `name` and `other`") end
+		local canCollide = args.canCollide
+		if type(canCollide) ~= "boolean" then error("collision collidable needs canCollide bool") end
+		return recorded("BuildKit collision rule", function()
+			PhysicsService:CollisionGroupSetCollidable(name, other, canCollide)
+			return { mode = "collidable", name = name, other = other, canCollide = canCollide }
+		end)
+	end
+	if mode == "assign" then
+		if not name then error("collision assign needs a group name") end
+		local targets = p4BulkTargets(args, "collision assign")
+		return recorded("BuildKit collision assign", function()
+			local assigned = 0
+			for _, inst in ipairs(targets) do
+				for _, p in ipairs(partsOf(inst)) do
+					if not p:IsA("Terrain") then
+						pcall(function() p.CollisionGroup = name end)
+						assigned += 1
+					end
+				end
+			end
+			return { mode = "assign", name = name, parts = assigned }
+		end)
+	end
+	error("collision mode must be list, create, delete, assign, or collidable")
+end
+
+-- ---------- sound -------------------------------------------------------------
+-- Set dressing is audio too. A Sound parented to a BasePart is positional 3D audio;
+-- parented to SoundService it is global ambience.
+local function soundAssetId(value, label)
+	if type(value) == "number" then return "rbxassetid://" .. tostring(math.floor(value)) end
+	local s = tostring(value or "")
+	if s == "" then error(label .. " needs a soundId (number or rbxassetid:// string)") end
+	if string.match(s, "^%d+$") then return "rbxassetid://" .. s end
+	return s
+end
+
+function handlers.sound(args)
+	args = args or {}
+	local mode = string.lower(tostring(args.mode or "add"))
+	local SoundService = game:GetService("SoundService")
+
+	if mode == "list" then
+		local host = args.target and findInst(args.target) or workspace
+		if not host then error("target not found: " .. tostring(args.target)) end
+		local out = {}
+		for _, d in ipairs(host:GetDescendants()) do
+			if d:IsA("Sound") then
+				table.insert(out, { path = d:GetFullName(), soundId = d.SoundId, volume = r1(d.Volume), looped = d.Looped, playing = d.Playing })
+			end
+			if #out >= 100 then break end
+		end
+		return { mode = "list", count = #out, sounds = out }
+	end
+
+	if mode == "remove" then
+		local host = args.target and findInst(args.target) or SoundService
+		if not host then error("target not found: " .. tostring(args.target)) end
+		return recorded("BuildKit sound remove", function()
+			local removed = 0
+			for _, d in ipairs(host:GetDescendants()) do
+				if d:IsA("Sound") and (args.name == nil or d.Name == tostring(args.name)) then
+					d:Destroy()
+					removed += 1
+				end
+			end
+			return { mode = "remove", removed = removed }
+		end)
+	end
+
+	if mode ~= "add" then error("sound mode must be add, remove, or list") end
+
+	local parent = SoundService
+	if args.target ~= nil then
+		local inst = findInst(args.target)
+		if not inst then error("target not found: " .. tostring(args.target)) end
+		parent = inst
+	end
+	local soundId = soundAssetId(args.soundId, "sound add")
+	return recorded("BuildKit sound", function()
+		local s = Instance.new("Sound")
+		s.Name = args.name and tostring(args.name) or "BuildKitSound"
+		s.SoundId = soundId
+		s.Volume = args.volume ~= nil and p4Number(args.volume, "sound volume", 0, 10) or 0.5
+		s.Looped = args.looped == true
+		s.PlaybackSpeed = args.speed ~= nil and p4Number(args.speed, "sound speed", 0.05, 20) or 1
+		if args.rollOffMin ~= nil then s.RollOffMinDistance = p4Number(args.rollOffMin, "sound rollOffMin", 0, 10000) end
+		if args.rollOffMax ~= nil then s.RollOffMaxDistance = p4Number(args.rollOffMax, "sound rollOffMax", 0, 100000) end
+		s.Parent = parent
+		return { mode = "add", path = s:GetFullName(), soundId = s.SoundId, positional = parent:IsA("BasePart") }
+	end)
+end
+
+-- ---------- physical constraints ----------------------------------------------
+-- Articulated props were ProximityPrompt scripts only — nothing physically hinged.
+local CONSTRAINT_KINDS = {
+	hinge = "HingeConstraint", weld = "WeldConstraint", motor = "Motor6D", motor6d = "Motor6D",
+	spring = "SpringConstraint", prismatic = "PrismaticConstraint", ball = "BallSocketConstraint",
+	rope = "RopeConstraint", rod = "RodConstraint",
+}
+
+function handlers.constraint(args)
+	args = args or {}
+	local mode = string.lower(tostring(args.mode or "add"))
+
+	if mode == "list" then
+		local host = args.target and findInst(args.target) or workspace
+		if not host then error("target not found: " .. tostring(args.target)) end
+		local out = {}
+		for _, d in ipairs(host:GetDescendants()) do
+			if d:IsA("Constraint") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+				table.insert(out, { path = d:GetFullName(), class = d.ClassName })
+			end
+			if #out >= 100 then break end
+		end
+		return { mode = "list", count = #out, constraints = out }
+	end
+
+	if mode == "remove" then
+		local host = args.target and findInst(args.target) or workspace
+		if not host then error("target not found: " .. tostring(args.target)) end
+		return recorded("BuildKit constraint remove", function()
+			local removed = 0
+			for _, d in ipairs(host:GetDescendants()) do
+				if d:IsA("Constraint") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+					d:Destroy()
+					removed += 1
+				end
+			end
+			return { mode = "remove", removed = removed }
+		end)
+	end
+
+	if mode ~= "add" then error("constraint mode must be add, remove, or list") end
+
+	local kindKey = (string.gsub(string.lower(tostring(args.kind or "hinge")), "[%s_%-]", ""))
+	local className = CONSTRAINT_KINDS[kindKey]
+	if not className then
+		local names = {}
+		for k in pairs(CONSTRAINT_KINDS) do table.insert(names, k) end
+		table.sort(names)
+		error("unknown constraint kind '" .. tostring(args.kind) .. "' — valid: " .. table.concat(names, ", "))
+	end
+
+	local a = findInst(args.a or args.part0)
+	local b = findInst(args.b or args.part1)
+	if not a or not a:IsA("BasePart") then error("constraint `a` must name a BasePart") end
+	if not b or not b:IsA("BasePart") then error("constraint `b` must name a BasePart") end
+
+	return recorded("BuildKit constraint", function()
+		-- WeldConstraint takes parts directly; every other kind is Attachment-based.
+		if className == "WeldConstraint" then
+			local w = Instance.new("WeldConstraint")
+			w.Name = args.name and tostring(args.name) or "BuildKitWeld"
+			w.Part0, w.Part1 = a, b
+			w.Parent = a
+			return { mode = "add", kind = "weld", class = className, path = w:GetFullName() }
+		end
+
+		local a0 = Instance.new("Attachment")
+		a0.Name = "BuildKitA0"
+		if args.offsetA ~= nil then a0.Position = p4Vec(args.offsetA, "constraint offsetA") end
+		a0.Parent = a
+
+		local a1 = Instance.new("Attachment")
+		a1.Name = "BuildKitA1"
+		if args.offsetB ~= nil then a1.Position = p4Vec(args.offsetB, "constraint offsetB") end
+		a1.Parent = b
+
+		-- The hinge axis is the attachments' local X (Axis), so orient both the same way.
+		if args.axis ~= nil then
+			local axis = p4Vec(args.axis, "constraint axis")
+			if axis.Magnitude > 0 then
+				a0.Axis = axis.Unit
+				a1.Axis = axis.Unit
+			end
+		end
+
+		local c = Instance.new(className)
+		c.Name = args.name and tostring(args.name) or ("BuildKit" .. className)
+		if className == "Motor6D" then
+			c.Part0, c.Part1 = a, b
+			c.C0 = CFrame.new(a0.Position)
+			c.C1 = CFrame.new(a1.Position)
+			a0:Destroy()
+			a1:Destroy()
+		else
+			c.Attachment0 = a0
+			c.Attachment1 = a1
+			if className == "HingeConstraint" then
+				if args.limits == true then
+					c.LimitsEnabled = true
+					if args.lower ~= nil then c.LowerAngle = p4Number(args.lower, "constraint lower", -180, 180) end
+					if args.upper ~= nil then c.UpperAngle = p4Number(args.upper, "constraint upper", -180, 180) end
+				end
+				if args.motor == true then
+					c.ActuatorType = Enum.ActuatorType.Motor
+					c.AngularVelocity = args.velocity ~= nil and p4Number(args.velocity, "constraint velocity", -100, 100) or 1
+					-- plain integer, not 1e9: the plugin static-scan gate reads `e9` as an unknown identifier
+					c.MotorMaxTorque = args.torque ~= nil and p4Number(args.torque, "constraint torque", 0, 1000000000) or 10000
+				end
+			end
+		end
+		c.Parent = a
+		return { mode = "add", kind = kindKey, class = className, path = c:GetFullName() }
+	end)
+end
+
+local APPLY_ACTIONS = { build = true, edit = true, replace = true, scatter = true, place = true, distribute = true, align = true, ground = true, terrain = true }
+function handlers.apply(args)
+	args = args or {}
+	local ops = args.ops
+	if type(ops) ~= "table" or #ops == 0 then error("apply needs a non-empty ops array") end
+	if #ops > 500 then error("apply is capped at 500 ops") end
+	for i, op in ipairs(ops) do
+		if type(op) ~= "table" or type(op.action) ~= "string" or not APPLY_ACTIONS[op.action] then error("apply op " .. tostring(i) .. ": unknown action " .. tostring(op and op.action)) end
+		if type(op.args) ~= "table" then error("apply op " .. tostring(i) .. ": args must be a table") end
+	end
+	return recorded("BuildKit apply (" .. #ops .. ")", function()
+		local results, warnings = {}, {}
+		for i, op in ipairs(ops) do
+			local result = handlers[op.action](op.args)
+			results[i] = { action = op.action, result = result }
+			if type(result) == "table" then
+				if result.qa and type(result.qa.warnings) == "table" then for _, warning in ipairs(result.qa.warnings) do table.insert(warnings, tostring(warning)) end end
+				if type(result.warnings) == "table" then for _, warning in ipairs(result.warnings) do table.insert(warnings, tostring(warning)) end end
+			end
+		end
+		return { count = #results, results = results, warnings = warnings }
+	end)
 end
 
 -- Read or set the Studio selection: operate on what the user clicked ('get'),
--- or select a target so the user SEES what you mean ('set').
+-- or select a target so the user SEES what you mean ('set'). Full paths are
+-- preserved so duplicate leaf names stay addressable.
 function handlers.selection(args)
 	local Selection = game:GetService("Selection")
 	if args.mode == "set" then
@@ -1048,7 +2355,8 @@ function handlers.selection(args)
 	end
 	local out = {}
 	for _, s in ipairs(Selection:Get()) do
-		local entry = { name = s.Name, class = s.ClassName, path = s:GetFullName() }
+		local fullPath = s:GetFullName()
+		local entry = { name = s.Name, class = s.ClassName, path = fullPath, fullPath = fullPath }
 		if s:IsA("Model") or s:IsA("BasePart") then
 			local c, sz = bboxOf(s)
 			entry.center = { r1(c.X), r1(c.Y), r1(c.Z) }

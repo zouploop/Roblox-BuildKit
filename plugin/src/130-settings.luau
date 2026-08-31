@@ -3,6 +3,7 @@
 local plugin = require(script.Parent.Ctx).plugin
 local post = require(script.Parent.Poll).post
 local CONFIG_DEFAULTS = require(script.Parent.Poll).CONFIG_DEFAULTS
+local configureLiveSync = require(script.Parent.Poll).configureLiveSync
 local toolbar = require(script.Parent.Toolbar).toolbar
 --#endregion
 
@@ -24,7 +25,7 @@ if okWidget and widget then
 	root.Size = UDim2.fromScale(1, 1); root.BackgroundColor3 = Color3.fromRGB(34, 36, 42); root.BorderSizePixel = 0; root.Parent = widget
 	local scroll = Instance.new("ScrollingFrame")
 	scroll.Size = UDim2.new(1, -12, 1, -52); scroll.Position = UDim2.fromOffset(6, 6); scroll.BackgroundTransparency = 1
-	scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 6; scroll.CanvasSize = UDim2.new(0, 0, 0, 920); scroll.Parent = root
+	scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 6; scroll.CanvasSize = UDim2.new(0, 0, 0, 990); scroll.Parent = root
 	local layout = Instance.new("UIListLayout"); layout.Padding = UDim.new(0, 5); layout.SortOrder = Enum.SortOrder.LayoutOrder; layout.Parent = scroll
 	local ord = 0
 	local function lbl(text, color, h)
@@ -35,11 +36,11 @@ if okWidget and widget then
 		return t
 	end
 	local boxes = {}
-	local function field(key, placeholder)
+	local function field(key, placeholder, default)
 		lbl(placeholder, Color3.fromRGB(150, 152, 160), 15)
 		local b = Instance.new("TextBox")
 		b.Size = UDim2.new(1, 0, 0, 26); b.BackgroundColor3 = Color3.fromRGB(24, 26, 30); b.TextColor3 = Color3.fromRGB(230, 232, 238)
-		b.Text = tostring(getS(key, CONFIG_DEFAULTS[key] or "")); b.ClearTextOnFocus = false; b.Font = Enum.Font.Code; b.TextSize = 13
+		b.Text = tostring(getS(key, default or CONFIG_DEFAULTS[key] or "")); b.ClearTextOnFocus = false; b.Font = Enum.Font.Code; b.TextSize = 13
 		b.TextXAlignment = Enum.TextXAlignment.Left; b.PlaceholderText = placeholder; ord = ord + 1; b.LayoutOrder = ord; b.Parent = scroll
 		local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 6); pad.Parent = b
 		boxes[key] = b
@@ -73,6 +74,9 @@ if okWidget and widget then
 	toggleBtn("meshRef", "Use meshes as reference", true)
 	toggleBtn("localImport", "Local-gen import (ComfyUI+Hunyuan)", false)
 	toggleBtn("autoQA", "Auto-QA every build", true)
+	lbl("VIEWER SYNC", Color3.fromRGB(120, 200, 255), 22)
+	field("liveSyncIntervalMs", "Viewer poll interval (ms)", 1500)
+	toggleBtn("liveSync", "Auto-sync viewer", true)
 	lbl("STATUS", Color3.fromRGB(120, 200, 255), 22)
 	local statusLbl = lbl("not saved yet", Color3.fromRGB(180, 182, 190), 18)
 
@@ -88,20 +92,24 @@ if okWidget and widget then
 	-- bridgeToken is bridge AUTH, matched between server + plugin — it must NOT be pushed
 	-- to /config (that would send the secret over the very channel it protects). It lives
 	-- only in plugin:SetSetting on each side.
-	local LOCAL_ONLY = { bridgeToken = true }
+	local LOCAL_ONLY = { bridgeToken = true, liveSync = true, liveSyncIntervalMs = true }
 	local function gather()
 		local cfg = { modes = {} }
 		for k, b in pairs(boxes) do
 			if not LOCAL_ONLY[k] then cfg[k] = b.Text end
 		end
-		for k, getter in pairs(toggles) do cfg.modes[k] = getter() end
+		for k, getter in pairs(toggles) do
+			if not LOCAL_ONLY[k] then cfg.modes[k] = getter() end
+		end
 		return cfg
 	end
 	saveBtn.MouseButton1Click:Connect(function()
 		for k, b in pairs(boxes) do setS(k, b.Text) end
 		for k, getter in pairs(toggles) do setS(k, getter()) end
+		local sync = configureLiveSync({ enabled = toggles.liveSync(), intervalMs = boxes.liveSyncIntervalMs.Text })
+		boxes.liveSyncIntervalMs.Text = tostring(sync.intervalMs)
 		post("/config", gather())
-		statusLbl.Text = "saved -> local config file (~/.buildkit/config.json)"
+		statusLbl.Text = ("saved -> local config file; viewer autosync %s (%dms)"):format(sync.enabled and "on" or "off", sync.intervalMs)
 		statusLbl.TextColor3 = Color3.fromRGB(120, 220, 140)
 	end)
 	testBtn.MouseButton1Click:Connect(function()

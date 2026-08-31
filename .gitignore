@@ -9,8 +9,6 @@
 !/LICENSE
 !/CONTRIBUTING.md
 
-!/tests/
-!/tests/**
 !/vitest.config.ts
 !/selene.toml
 
@@ -25,6 +23,15 @@
 
 !/scripts/
 !/scripts/**
+!/generators/
+!/generators/**
+!/viewer/
+!/viewer/**
+/viewer/scene.json
+/viewer/.assetcache/
+!/library/
+!/library/**
+/library/recent-*.json
 
 !/skills/
 !/skills/**
@@ -32,9 +39,13 @@
 !/images/
 !/images/**
 
+!/specs/
+!/specs/**
+
 !/package.json
 !/package-lock.json
 !/tsconfig.json
+!/start.bat
 
 # Build output + local creds (the Open Cloud key lives in ~/.buildkit/config.json, outside
 # the repo, so the whitelist above can never track it).

@@ -3,8 +3,9 @@
 local plugin = require(script.Parent.Ctx).plugin
 --#endregion
 
--- BuildKitPlugin: long-polls the roblox-buildkit MCP server and runs build/camera
--- commands in the Edit datamodel. Pair with the roblox-buildkit-mcp Node server.
+-- BuildKitPlugin: long-polls the roblox-buildkit MCP server, runs build/camera
+-- commands in the Edit datamodel, and can autosync its scene to the local viewer.
+-- Pair with the roblox-buildkit-mcp Node server.
 -- Drop this file in: %LOCALAPPDATA%\Roblox\Plugins\
 
 local HttpService = game:GetService("HttpService")

@@ -45,16 +45,17 @@ const MODULES = [
 	["140-mesh-cutter.luau", "MeshCutter"],
 ];
 
-const HANDLERS = `annotate attr batch build build_gui cast checkpoint console contrast cutaway describe diff
-edit find frame frame_coords frame_dir frame_dir_coords group gui_preview insert insertAsset insertChest
-inspect isolate measure navcheck optimize ping prop qa restore restore_all restore_camera runtime_install
-runtime_remove save_camera script selection set_lighting sync tag undo`.split(/\s+/).sort();
+const HANDLERS = `align annotate apply attr batch build build_gui cast checkpoint collision console constraint
+contrast cutaway describe diff distribute edit find frame frame_coords frame_dir frame_dir_coords
+ground group gui_preview insert insertAsset insertChest inspect isolate map measure navcheck
+optimize ping prop qa replace restore restore_all restore_camera runtime_install runtime_remove
+place map_apply save_camera scatter scene_dump script selection set_lighting sound sync tag terrain undo view`.split(/\s+/).sort();
 
 // These are the file edges measured in the approved plan. Keeping the list here
 // makes the baseline graph a regression oracle without pretending this is a parser.
 const EDGES = [
 	["100-handlers.luau", "80-builders.luau", "buildSeating buildRoom buildStairs buildSlab buildCabinet buildTable buildShelf buildBed buildChair buildDesk buildNightstand buildDresser buildWardrobe buildFridge buildStove buildToilet buildBathtub buildProp"],
-	["100-handlers.luau", "10-geometry.luau", "colorOf matOf r1 findInst bboxOf camera getBBox partsOf pivotWorld describeInst"],
+	["100-handlers.luau", "10-geometry.luau", "colorOf matOf r1 findInst bboxOf camera getBBox partsOf pivotWorld describeInst sceneDump"],
 	["80-builders.luau", "20-detail.luau", "getOrMakeModel makeCyl makeBall roundLeg _regenTarget barPull roundKnob"],
 	["110-poll.luau", "00-header.luau", "HttpService RUNNING BRIDGE_TOKEN BASE PLACE"],
 	["100-handlers.luau", "00-header.luau", "recorded BRIDGE_TOKEN Lighting ChangeHistoryService RUNTIME_SOURCE"],

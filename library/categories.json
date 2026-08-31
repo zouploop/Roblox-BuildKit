@@ -1,0 +1,12 @@
+[
+  {
+    "id": "city",
+    "name": "city",
+    "createdBy": "user"
+  },
+  {
+    "id": "stores",
+    "name": "stores",
+    "createdBy": "user"
+  }
+]

@@ -1,204 +1,162 @@
 # roblox-buildkit
 
-A Roblox Studio plugin + agent skill that gives an AI agent a **steerable camera**, **cutaway/floor-plan capture**, and **parametric build primitives** — so it can *see exactly* what it builds instead of guessing camera coordinates.
+Windows tooling for building Roblox scenes with an AI agent. The repository contains:
 
-This repo ships the **plugin** (source + built `.rbxmx`), the **MCP server** that relays commands, and the **skills** (in `skills/`) that drive it.
+- a TypeScript MCP server;
+- a Roblox Studio plugin;
+- a browser Stage editor and read-only Studio Mirror;
+- generator files, reusable library presets, and agent skills.
 
-## How it works
+## Requirements
 
-Studio plugins can't listen for connections or screenshot the viewport. So:
-
-- The **MCP server** (a small Node process) talks MCP over stdio to the agent, and runs a tiny localhost HTTP server.
-- **BuildKitPlugin** (Luau) long-polls that HTTP server, runs commands in the Edit datamodel, posts results back.
-- **Capture** = the server takes an OS-level screenshot of the Studio window (PowerShell). Because the plugin sets `workspace.CurrentCamera.CFrame`, the window screenshot shows exactly the framed view.
-
-```
-Agent ──stdio──► MCP server ──HTTP long-poll──► BuildKitPlugin (Studio)
-                     │
-                     └── PowerShell ──► screenshot Studio window ──► PNG to agent
-```
-
-## Tools
-
-### Seeing what it builds
-
-| Tool | What it does |
-|------|--------------|
-| `rbx_frame` | **Primary capture path.** Compute `camera_position` + `look_at_position` framing a target's bbox, without moving the camera — feed the coords to the official `screen_capture`. |
-| `rbx_capture` | Screenshot with scene setup (cutaway / isolate / annotate / contrast) applied **and guaranteed torn down** around it. Needs Studio in the foreground. |
-| `rbx_floor_plan` | Top-down capture with everything above `ceilingY` hidden (interior layout). |
-| `rbx_orbit` | Turntable of N evenly-spaced labeled views in one call — batches angles that would otherwise be 2 calls each. |
-| `rbx_watch` | Samples the viewport on a timer **inside one call** → labeled sequence. The only way to watch motion faster than your own round trips. |
-| `rbx_describe` | Compact JSON scene readback: name/class/bbox per node + part props (anchored/material/color). |
-| `rbx_find` | Search the scene: name substring, `className` (IsA), CollectionService tag, attribute, or proximity. |
-| `rbx_inspect` | Bounding-box center/size, part count, immediate children of a target. |
-| `rbx_selection` | Get/set the Studio selection. |
-| `rbx_measure` | Distance + axis delta between two points/instances. |
-| `rbx_cast` | Raycast or box/sphere volume query (line-of-sight, ground height, clearance, "what's here"). |
-| `rbx_navcheck` | PathfindingService walkability check between two points; optional neon path visualization. |
-| `rbx_annotate` | Overlay a bbox outline + W×H×D dimension label on a target. |
-| `rbx_isolate` | Hide everything but a target for one shot. |
-| `rbx_restore` | Escape hatch: un-hide / un-recolor **everything** left over from a cutaway, isolate, or contrast — no token needed. |
-| `rbx_qa` | Geometric lint: unanchored parts, duplicate placement, interpenetration, and more. |
-| `rbx_optimize` | Runtime/streaming audit: part counts, CollisionFidelity, unanchored geometry, StreamingEnabled. |
-
-### Building & editing
-
-| Tool | What it does |
-|------|--------------|
-| `rbx_build` | Parametric primitives: `slab`, `room` (walls+floor+ceiling+openings), `stairs`, plus furniture/prop presets. |
-| `rbx_edit` | Modify an existing target in place — one undo step. |
-| `rbx_batch` | Run several build/edit ops in one call = one undo step + one round trip. |
-| `rbx_group` | Group/ungroup/weld parts (kind-tag models like 'drawer'/'door'). |
-| `rbx_prop` | Read/write any instance property (Transparency, Anchored, Material, custom props) without Luau. |
-| `rbx_attr` | Get/set/list Attributes (gameplay state). |
-| `rbx_tag` | Add/remove/list/query CollectionService tags. |
-| `rbx_script` | Read script source, list scripts, grep for a string (understand existing code). |
-| `rbx_sync` | Push on-disk `.luau` files into Studio's DataModel (Rojo gap-fix). |
-| `rbx_insert` | Insert a marketplace/toolbox asset by numeric id, anchor + place it. |
-| `rbx_gui` | Build a styled ScreenGui from a component tree (themes: noir/clean/neon). |
-| `rbx_gui_preview` | Toggle the CoreGui edit-time preview of a built ScreenGui. |
-| `rbx_checkpoint` | Save a hard checkpoint clone; restore it later (one undo step). |
-| `rbx_diff` | Compare two trees/checkpoints — added/removed/changed, keyed by path. |
-| `rbx_undo` | Undo/redo BuildKit mutations (also Ctrl+Z). |
-| `rbx_gen_mesh` | Text prompt or image → local AI mesh → MeshPart inserted into Studio. **Optional** — see [Local mesh generation](#local-mesh-generation-optional). |
-
-### Studio & play mode
-
-| Tool | What it does |
-|------|--------------|
-| `rbx_status` | Is the plugin connected/polling? Which places are connected? Active place filter? |
-| `rbx_use_place` | Route commands only to the Studio whose place name matches, when multiple are running. |
-| `rbx_set_lighting` | `day` (bright capture) / `noir` (restore moody look). |
-| `rbx_console` | Read the Studio output log in-channel (prints/warnings/errors, filtered). |
-| `rbx_run` | Run Luau in the live game via the runtime harness (last resort — prefer official `execute_luau`). |
-| `rbx_runtime` | Install/remove the play-mode runtime harness. |
+- Windows 10 or 11
+- Node.js 22 or newer
+- Roblox Studio
+- Claude Code for the included `npm run setup` registration command
+- the official Roblox Studio MCP separately installed when using its clean
+  `screen_capture` and `execute_luau` tools
 
 ## Install
 
-**1. Build the MCP server**
 ```powershell
-cd <repo-dir>
+git clone https://github.com/zouploop/Roblox-BuildKit.git
+cd Roblox-BuildKit
 npm install
-npm run build      # tsc → dist/, then regenerates + installs the plugin .rbxmx
+npm run build
+npm run setup
 ```
 
-**2. Install the plugin** — copy `plugin/BuildKitPlugin.rbxmx` into your local Roblox Studio **Plugins** folder (Studio → Plugins → Plugins Folder), then enable it. Restart Studio (or it loads on next focus). Click the **BuildKit** toolbar button to confirm it's ON.
+`npm run build` compiles `src/`, regenerates `plugin/BuildKitPlugin.rbxmx`, validates the
+plugin module graph, and copies the plugin into `%LOCALAPPDATA%\Roblox\Plugins` when that
+folder exists. If automatic installation is skipped, copy
+`plugin/BuildKitPlugin.rbxmx` into the folder opened by Studio's **Plugins → Plugins
+Folder** command.
 
-**3. Install the skills** — copy the `skills/` folder contents into your agent's skills directory (see [`skills/README.md`](skills/README.md)).
+`npm run setup` resolves this checkout's absolute `dist/index.js` path and registers the
+`roblox-buildkit` stdio server with Claude Code at user scope. It replaces a stale
+user-scoped BuildKit entry after the checkout moves. If Claude Code is not on `PATH`, it
+prints the exact command instead. Use `npm run setup -- --print` to print without changing
+configuration. This command does not install or modify the separate official Roblox
+Studio MCP.
 
-**4. Register the MCP server** — point the agent's MCP client at the built `dist/index.js` (see [`skills/README.md`](skills/README.md) for a copy/paste config).
+Restart Studio after the first build. The **BuildKit** toolbar button starts enabled; its
+highlighted state means the plugin is polling. The plugin and MCP server may start in
+either order and reconnect automatically.
 
-> **Server lifecycle:** the server is a standalone Node process — it starts when your agent session starts (the MCP client spawns `node dist/index.js`) and stops when the session ends. Studio opening/closing is decoupled: the plugin long-polls the server and auto-reconnects on its own (backs off 1s and retries while the server is down).
+## Architecture
 
-## For users: a quick tour
+```text
+Agent --stdio--> MCP server --HTTP long-poll--> BuildKitPlugin --edits--> Studio
+                         |
+                         +--SSE/HTTP--> browser Stage and Mirror
+```
 
-Once the plugin is installed and Studio is open, the **BuildKit** toolbar appears with three buttons: **BuildKit** (toggle polling on/off), **Settings**, and **Mesh Cutter**.
+The bridge listens on `127.0.0.1:44760`; the browser viewer listens on
+`127.0.0.1:8642`. Override them with `BUILDKIT_PORT` and `BUILDKIT_VIEWER_PORT`.
+`start.bat` is the self-locating standalone launcher; Claude Code normally starts the MCP
+process itself.
 
-![BuildKit toolbar](images/toolbar.png)
+## Browser workflow
 
-### 1. Turn it on
+Open <http://localhost:8642/stage.html> while the MCP server is running.
 
-Click the **BuildKit** toolbar button so it's active (highlighted). This starts polling the MCP server on `127.0.0.1:44760`. The button state is just a toggle — if the server isn't running yet, the plugin keeps retrying in the background and connects automatically the moment it's up.
+### Stage
 
-### 2. Add your Open Cloud credentials (optional)
+Stage is the editable construction bench. Every `generators/*.js` file exports a
+synchronous `generate(args)` function that returns validated build operations. The server
+watches those files, keeps the last good result after a bad edit, and broadcasts updates
+to the page.
 
-Click **Settings** to open the BuildKit Settings panel:
+Stage supports selection, marquee selection, smart select, grouping, reparenting,
+properties, move/rotate/scale gizmos, clipboard operations, delete, undo/redo, build
+replay, CSG preview, and import/export. Shortcuts are **F** for Move, **R** for Rotate,
+and **G** for Scale. Its Explorer, Properties, Library, and History panels can be closed,
+resized, floated, docked, and stacked as tabs; the renderer adapts to the docked area.
 
-![BuildKit Settings panel](images/settings.png)
+The Library reads shareable presets from `library/`. Generator entries also live in the
+Library panel and can be enabled or disabled there. **Port to Roblox** or
+`rbx_stage_commit` sends the enabled Stage snapshot to Studio.
 
-The **CONNECTIONS** section holds the values the server needs for AI mesh uploads:
+Headless prop workers use separate Stage sessions (maximum six) through
+`rbx_stage_build`, `rbx_stage_status`, `rbx_stage_render`, and `rbx_stage_clear`, then save
+winners with `rbx_library_save`. Those sessions do not touch Studio until explicitly
+committed.
 
-- **Open Cloud API key** — your Roblox Open Cloud key (used for asset uploads via `rbx_gen_mesh`)
-- **Creator ID / Creator type** — the user or group that owns uploaded assets
-- **ComfyUI server URL** — where local image generation runs (e.g. `http://192.168.1.10:8188`)
-- **Hunyuan3D endpoint** — optional, for local 3D mesh generation
+### Mirror
 
-The **BUILD MODES** toggles let you enable/disable which build backends the agent is allowed to use (lightweight primitives, official AI generation, local-gen import, etc.).
+Open <http://localhost:8642/stage.html?mirror=1>. Mirror is a read-only reflection of the
+live Studio place and exposes only its hierarchy Explorer. It intentionally has no
+Properties, Library, History, transform gizmos, or preview/edit toggle. Use Studio or
+`rbx_apply` to edit live instances.
 
-Set the values, then press **Save** (writes them to `~/.buildkit/config.json` and pushes them to the server) or **Test** (pushes without saving). The key never lands in your place file.
+Mirror can copy a selected part, union, or Model into Stage and can mark a selected Studio
+instance as the map ground target. Plugin-side live sync starts enabled at a 1500 ms
+interval; the plugin Settings panel and `rbx_live_sync_start(intervalMs)` accept
+100–60000 ms. Deleted Studio instances disappear on the next changed snapshot. The viewer
+Options menu includes a force-sync action.
 
-### 3. Cut meshes without leaving Studio (optional)
+## Main tools
 
-Click **Mesh Cutter** to open the mesh editing panel:
+The MCP manifest is the source of truth for exact arguments. Most work starts with:
 
-![BuildKit Mesh Cutter](images/mesh-cutter.png)
+| Tool | Purpose |
+|---|---|
+| `rbx_map` | Compact, filtered read of the live place. |
+| `rbx_view` | Frame and compose one or more views with temporary visibility changes. |
+| `rbx_apply` | Atomic bulk edits selected by target or filter. |
+| `rbx_place` | Deterministic place/line/grid/ring/scatter placement from Studio prefabs. |
+| `rbx_qa` | Geometry checks including gaps, overlaps, z-fights, and anchoring. |
+| `rbx_dev_reload` | Rebuild and replace a stale BuildKit server process. |
 
-This lets you split a MeshPart in-place using an EditableMesh plane cut — no Blender, no re-upload. Cut a two-piece model into halves, then **Make Openable** to turn it into a hinged chest. Each cut is one undo step (Ctrl+Z).
+Related map tools are `rbx_map_status`, `rbx_map_apply`, `rbx_map_auto_apply`, and
+`rbx_ground_part`. Stage tools cover isolated builds, history, import/export, library
+presets, and commits. Studio tools cover build/edit/batch operations, terrain, constraints,
+sounds, GUI, tags, attributes, scripts, checkpoints, navigation, capture, and inspection.
+`rbx_conformance` creates or compares measurable scene profiles, and `rbx_scene_dump`
+refreshes the browser Mirror.
 
-### 4. Let the agent drive
+## Capture behavior
 
-Everything above just gives the agent hands-on access. The real workflow is: you tell your agent what to build, and it uses the `rbx_*` tools (see [Tools](#tools)) to capture, build, inspect, and QA the scene through the plugin. Studio stays open and on-screen during capture.
+The preferred clean capture path is:
 
-## For agents: install this for the user
+1. call `rbx_frame` to calculate camera coordinates;
+2. pass those coordinates to the official Roblox Studio MCP `screen_capture` tool.
 
-If the user asks you to install roblox-buildkit, follow these steps:
+That path renders the viewport without Studio chrome and works while Studio is in the
+background. `rbx_capture`, `rbx_orbit`, `rbx_floor_plan`, and `rbx_watch` use the Windows
+screen-grab fallback because they compose temporary scene state or timed frames inside one
+call. Studio must be visible for those tools. The fallback uses the plugin's
+`CurrentCamera.ViewportSize` to crop to the 3D viewport when possible and returns the full
+Studio client area only when the crop cannot be resolved.
 
-1. **Check the repo** — it should be cloned somewhere stable, e.g. `C:\Users\<user>\roblox-buildkit` (or `<user>/src/roblox-buildkit` on macOS/Linux). Clone it if missing:
-   ```
-   git clone https://github.com/zouploop/Roblox-BuildKit.git
-   ```
-2. **Build the server** — in the repo dir: `npm install` then `npm run build`. This compiles `src/` → `dist/` and regenerates + installs `plugin/BuildKitPlugin.rbxmx` into Studio's Plugins folder.
-3. **Install the plugin** — `npm run build` already copies the `.rbxmx` to `%LOCALAPPDATA%\Roblox\Plugins\` (Windows). Verify `plugin/BuildKitPlugin.rbxmx` is in that folder; the user may need to restart Studio and click the **BuildKit** toolbar button to enable polling.
-4. **Install the skills** — copy the contents of the `skills/` folder into the agent's skills directory.
-5. **Register the MCP server** — add to the agent's MCP config (e.g. `~/.mcp.json`, or run the agent's equivalent of `claude mcp add`):
-   ```json
-   {
-     "mcpServers": {
-       "roblox-buildkit": {
-         "command": "node",
-         "args": ["<repo-dir>/dist/index.js"]
-       }
-     }
-   }
-   ```
-6. **Verify** — after a restart, call `rbx_status`; it should report the plugin connected and polling. Studio and the server can start in any order.
+## Settings and local files
 
-## Local mesh generation (optional)
+The plugin Settings panel stores accepted server configuration in
+`~/.buildkit/config.json`; override that directory with `BUILDKIT_CONFIG_DIR`. Open Cloud
+keys are never written into a place file. Creator ID and local generation endpoints are
+user settings and have no machine-specific account defaults.
 
-`rbx_gen_mesh` drives a **local** generation chain (ComfyUI → Hunyuan3D → Blender → Open
-Cloud upload) that runs on your own GPU. That pipeline lives in `pipeline/gen_to_roblox.py`
-and is **not part of this repo** — a plain clone doesn't have it.
+Set `BRIDGE_TOKEN` or `bridgeToken` in the config file to require the same token at the
+plugin boundary. The bridge remains localhost-only, but without a token any local process
+can call it.
 
-The server checks for the script at startup and only registers `rbx_gen_mesh` when it's
-actually there, so a normal install simply doesn't see the tool (you'll get one line on
-stderr saying it's disabled). Nothing else is affected. To enable it, drop the pipeline in
-place and add your Open Cloud key + Creator ID via the plugin's **Settings** panel.
+The optional `rbx_gen_mesh` tool is registered only when
+`pipeline/gen_to_roblox.py` exists. That local pipeline requires ComfyUI, Hunyuan3D,
+Blender, Roblox Open Cloud credentials, and its own environment configuration. Normal
+clones do not include it and otherwise run unchanged.
 
 ## Development
 
 ```powershell
 npm install
-npm run build   # tsc -> dist/, then regenerate + install the plugin .rbxmx
-npm test        # vitest: path mapping, GUI theme resolution, bridge routing + failover
+npm run build
+npm test
 ```
 
-The tests cover the pure-TypeScript layer (`src/sync.ts`, `src/gui.ts`, `src/bridge.ts`);
-the bridge suite drives real HTTP with a fake plugin, so the long-poll contract, place/ctx
-routing, shared-bridge promotion, and the endpoint guards are all exercised for real. The
-Luau plugin needs Studio and isn't covered — change it with corresponding care.
+`plugin/src/*.luau` is the plugin source of truth. `plugin/BuildKitPlugin.rbxmx` is the
+generated install artifact and CI verifies that it matches. The tracked core tests cover
+the TypeScript bridge, configuration, capture invocation, GUI schemas, sync mapping, and
+tool registration. CI also type-checks TypeScript, audits dependencies, checks plugin
+scope/contracts, and runs Selene; live Studio behavior still requires Studio verification.
 
-The Luau source of truth is the ordered ModuleScripts in `plugin/src/` (`00-` … `140-`).
-`plugin/BuildKitPlugin.rbxmx` is the single generated artifact, tracked so users can install
-without the toolchain: edit `plugin/src/`, run `npm run build`, and commit the regenerated
-artifact. CI fails if it drifts.
-
-## Notes / limits
-
-- Capture brings Studio to the foreground and grabs the window (CopyFromScreen) — reliable for GPU 3D content, but Studio must not be fully off-screen. With several Studios open, set the active place filter (`rbx_use_place`) and the grab targets the matching window.
-- Plugin uses a fixed command vocabulary (no arbitrary Luau eval — plugins can't `loadstring`). Use the official `execute_luau` for ad-hoc code.
-- Port defaults to 44760 (`BUILDKIT_PORT` env to change; must match `BASE` in the plugin).
-- **Optional bridge auth (recommended on a shared machine).** Set `BRIDGE_TOKEN` when starting
-  the server (or add `"bridgeToken"` to `~/.buildkit/config.json`); then every plugin-boundary
-  request must present the same token. Paste the same value into the plugin's Settings panel
-  → *Bridge token*. When set, the plugin only auto-pushes its saved creds to a server that
-  validates the token. The token is still a *localhost* trust boundary — a local process that
-  binds port 44760 first can read it from the plugin's request — so it defends against rogue
-  *clients* driving the bridge, not against a pre-existing port squatter.
-- Without a token, the bridge binds `127.0.0.1` only and rejects browser-origin requests (so a
-  web page can't reach it), but any *local* process can drive your Studio through it —
-  including `sync`, which writes script source into the open place. Same trust boundary as any
-  local dev server; be aware of it on a shared machine.
-- A capture that fails partway can leave parts hidden or recolored. Each such change now
-  also records its original value as an attribute on the part, so `rbx_restore` (or just
-  reloading the plugin) puts everything back — even in a later Studio session.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the installable skills under [skills/](skills/).

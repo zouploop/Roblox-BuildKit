@@ -11,6 +11,39 @@ export const rgb255 = z.array(z.number().min(0).max(255)).length(3);
 // contract agree.
 export const cap = (max: number) => z.number().int().min(1).max(max);
 
+export type TargetIdentity = { path?: unknown; fullPath?: unknown; name?: unknown };
+
+function identityText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function targetReference(value: TargetIdentity): string {
+  const path = identityText(value.fullPath) ?? identityText(value.path);
+  if (path) return path;
+  const name = identityText(value.name);
+  if (name) return name;
+  throw new Error("target identity is missing both path and name");
+}
+
+export function targetReferences(values: readonly TargetIdentity[]): string[] {
+  const names = new Map<string, number>();
+  const fallbackNames = new Set<string>();
+  for (const value of values) {
+    const path = identityText(value.fullPath) ?? identityText(value.path);
+    const name = identityText(value.name);
+    if (name) names.set(name, (names.get(name) ?? 0) + 1);
+    if (!path) {
+      if (name) fallbackNames.add(name);
+    }
+  }
+  for (const name of fallbackNames) {
+    if ((names.get(name) ?? 0) > 1) {
+      throw new Error(`target identity for duplicate name '${name}' is missing a full path`);
+    }
+  }
+  return [...new Set(values.map(targetReference))];
+}
+
 // --- build: parametric primitives --------------------------------------------
 // The build spec schema, shared by rbx_build (wrapped under `spec`) and rbx_batch
 // (build op args are the spec fields DIRECTLY). One source of truth so the batch
@@ -35,6 +68,7 @@ export const BUILD_SPEC = z
             transparency: z.number().optional(),
             neon: z.boolean().optional().describe("Material=Neon (glows)."),
             canCollide: z.boolean().optional(),
+            op: z.enum(["union", "subtract", "intersect"]).optional().describe("with spec.csg: CSG operation for this part; omitted/union adds, subtract hollows, intersect clips."),
             negate: z.boolean().optional().describe("with spec.csg: SUBTRACT this part from the union (hollow out mugs/cups/bowls)."),
             name: z.string().optional(),
             light: z
@@ -114,6 +148,15 @@ export const BUILD_SPEC = z
       .optional()
       .describe("era/style preset — bundles color/material/style/hardware (your explicit fields still win)."),
     weather: z.boolean().optional().describe("subtle per-part color variation so surfaces aren't dead-flat uniform."),
+    csgMax: z
+      .number()
+      .int()
+      .min(1)
+      .max(2000)
+      .optional()
+      .describe(
+        "with spec.csg: max source parts before CSG is skipped and the parts are left unmerged. Default 100. Raise it for detailed props, lower it if unions come out degenerate — past roughly Roblox's ~20k-tri union budget CSG starts simplifying or failing, and where that bites depends on the geometry."
+      ),
     csg: z.boolean().optional().describe("union the static carcass into one smooth shell via CSG (drawers/doors/sink stay separate; guarded — falls back to parts on any failure)."),
     plinth: z.boolean().optional().describe("dresser/case goods: add a 2-tier plinth base."),
     bevel: z.boolean().optional().describe("table: chamfer the top edges (WedgePart, no CSG)."),
@@ -156,8 +199,72 @@ export const BUILD_SPEC = z
   })
   .passthrough();
 
+const EDIT_OP = z.enum(["move", "rotate", "scale", "transform", "recolor", "material", "anchor", "rename", "delete", "clone"]);
+const EDIT_VEC3 = z.array(z.number().finite()).length(3);
+
+export function editArgumentIssues(value: Record<string, unknown>): { path: string[]; message: string }[] {
+  const issues: { path: string[]; message: string }[] = [];
+  const missing = (key: string, message: string) => {
+    if (value[key] === undefined) issues.push({ path: [key], message });
+  };
+  switch (value.op) {
+    case "move":
+      if (value.delta === undefined && value.to === undefined) missing("delta", "move needs delta or to");
+      break;
+    case "rotate":
+      missing("degrees", "rotate needs degrees");
+      break;
+    case "scale":
+      missing("scale", "scale needs scale");
+      break;
+    case "transform":
+      missing("position", "transform needs position");
+      missing("rotation", "transform needs rotation");
+      missing("size", "transform needs size");
+      break;
+    case "recolor":
+      missing("color", "recolor needs color");
+      break;
+    case "material":
+      missing("material", "material needs material");
+      break;
+    case "rename":
+      missing("name", "rename needs name");
+      break;
+    case "clone":
+      if (value.offset !== undefined && !Array.isArray(value.offset)) {
+        issues.push({ path: ["offset"], message: "clone offset must be [x,y,z]" });
+      }
+      break;
+  }
+  return issues;
+}
+
+export const EDIT_ARGS = z
+  .object({
+    target: z.string().min(1).describe("Instance full path preferred; an unambiguous name is also accepted."),
+    op: EDIT_OP,
+    delta: EDIT_VEC3.optional().describe("move: [dx,dy,dz] world translation."),
+    to: EDIT_VEC3.optional().describe("move: absolute [x,y,z] target for the bbox center."),
+    degrees: EDIT_VEC3.optional().describe("rotate: [x,y,z] degrees about bbox center."),
+    scale: z.union([z.number().finite().positive(), z.array(z.number().finite().positive()).length(3)]).optional().describe("scale: factor (model) or factor/[x,y,z] (part)."),
+    position: EDIT_VEC3.optional().describe("transform: absolute BasePart [x,y,z] position."),
+    rotation: EDIT_VEC3.optional().describe("transform: absolute BasePart [rx,ry,rz] orientation in degrees."),
+    size: z.array(z.number().finite().positive()).length(3).optional().describe("transform: absolute BasePart [x,y,z] size."),
+    color: rgb255.optional().describe("recolor: [r,g,b] 0-255."),
+    material: z.string().min(1).optional().describe("material: Roblox Material enum name."),
+    name: z.string().min(1).optional().describe("rename: new name; clone: name for the copy."),
+    offset: EDIT_VEC3.optional().describe("clone: [dx,dy,dz] world offset for the copy."),
+    anchored: z.boolean().optional().describe("anchor: true to anchor every part (default), false to unanchor."),
+  })
+  .passthrough()
+  .superRefine((value, ctx) => {
+    for (const issue of editArgumentIssues(value)) ctx.addIssue({ code: "custom", path: issue.path, message: issue.message });
+  });
+
 export function validateBatchOps(
-  ops: { action: "build" | "edit"; args: Record<string, unknown> }[]
+  ops: { action: "build" | "edit"; args: Record<string, unknown> }[],
+  options: { validateEdits?: boolean } = {},
 ): { action: "build" | "edit"; args: unknown }[] {
   return ops.map((op, i) => {
     if (op.action === "build") {
@@ -171,6 +278,18 @@ export function validateBatchOps(
       }
       return { action: "build" as const, args: spec.data };
     }
-    return op;
+    // Stage-share artifacts predate the Studio edit-op contract and may carry
+    // opaque edit records. Keep that interchange format forward-compatible;
+    // direct Studio batch/edit calls use the strict default.
+    if (options.validateEdits === false) return { action: "edit" as const, args: op.args ?? {} };
+    const edit = EDIT_ARGS.safeParse(op.args ?? {});
+    if (!edit.success) {
+      const first = edit.error.issues[0];
+      throw new Error(
+        `rbx_batch op ${i + 1} (edit): ${first?.path?.join(".") || "args"} — ${first?.message ?? "invalid"}. ` +
+          `Edit ops need target, op, and the fields required by that operation.`
+      );
+    }
+    return { action: "edit" as const, args: edit.data };
   });
 }
