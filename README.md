@@ -29,7 +29,7 @@ Windows tooling for building Roblox scenes with an AI agent. The repository cont
 - Windows 10 or 11
 - Node.js 22 or newer
 - Roblox Studio
-- Claude Code for the included `npm run setup` registration command
+- An MCP-compatible AI agent that can register a local stdio server
 - the official Roblox Studio MCP separately installed when using its clean
   `screen_capture` and `execute_luau` tools
 
@@ -50,11 +50,11 @@ folder exists. If automatic installation is skipped, copy
 Folder** command.
 
 `npm run setup` resolves this checkout's absolute `dist/index.js` path and registers the
-`roblox-buildkit` stdio server with Claude Code at user scope. It replaces a stale
-user-scoped BuildKit entry after the checkout moves. If Claude Code is not on `PATH`, it
-prints the exact command instead. Use `npm run setup -- --print` to print without changing
-configuration. This command does not install or modify the separate official Roblox
-Studio MCP.
+`roblox-buildkit` stdio server with the local agent integration at user scope. It replaces a
+stale user-scoped BuildKit entry after the checkout moves. If that integration is unavailable,
+it prints the exact command to adapt for your agent instead. Use `npm run setup -- --print` to
+print without changing configuration. This command does not install or modify the separate
+official Roblox Studio MCP.
 
 Restart Studio after the first build. The **BuildKit** toolbar button starts enabled; its
 highlighted state means the plugin is polling. The plugin and MCP server may start in
@@ -70,8 +70,8 @@ Agent --stdio--> MCP server --HTTP long-poll--> BuildKitPlugin --edits--> Studio
 
 The bridge listens on `127.0.0.1:44760`; the browser viewer listens on
 `127.0.0.1:8642`. Override them with `BUILDKIT_PORT` and `BUILDKIT_VIEWER_PORT`.
-`start.bat` is the self-locating standalone launcher; Claude Code normally starts the MCP
-process itself.
+`start.bat` is the self-locating standalone launcher; an MCP-compatible agent normally starts
+the server process itself.
 
 ## Browser workflow
 
