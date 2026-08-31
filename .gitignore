@@ -40,7 +40,8 @@
 !/images/**
 
 !/specs/
-!/specs/**
+/specs/*
+!/specs/.gitkeep
 
 !/package.json
 !/package-lock.json
