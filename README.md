@@ -182,9 +182,9 @@ The preferred clean capture path is:
 2. pass those coordinates to the official Roblox Studio MCP `screen_capture` tool.
 
 That path renders the viewport without Studio chrome and works while Studio is in the
-background. `rbx_capture`, `rbx_orbit`, `rbx_floor_plan`, and `rbx_watch` use the Windows
-screen-grab fallback because they compose temporary scene state or timed frames inside one
-call. Studio must be visible for those tools. The fallback uses the plugin's
+background. `rbx_view` and `rbx_watch` use the Windows screen-grab fallback because they
+compose temporary scene state or timed frames inside one call. Studio must be visible for
+those tools. The fallback uses the plugin's
 `CurrentCamera.ViewportSize` to crop to the 3D viewport when possible and returns the full
 Studio client area only when the crop cannot be resolved.
 

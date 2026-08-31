@@ -2650,7 +2650,7 @@ registerTool(
         unknown.push(name);
         continue;
       }
-      entry.handle.enable();
+      if (!entry.handle.enabled) entry.handle.enable();
       enabled.push(name);
     }
     return textResult({ enabled, unknown });
