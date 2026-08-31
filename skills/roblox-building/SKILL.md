@@ -44,11 +44,12 @@ run `npm run build` (compiles `dist/`, regenerates + installs the `.rbxmx`) and 
 | `rbx_prop(mode,target,name?,value?,names?)` | Get/set/list **ANY** property — Transparency/Anchored/Material/CanCollide/Color/custom (`rbx_attr` is Attributes only). `[x,y,z]`→Vector3, or Color3 if the name contains 'color'; Enum props take a string like `'SmoothPlastic'`. |
 | `rbx_group(mode,target?,parts?,name?,primary?,kind?)` | `group` wraps parts (by name or current selection) into ONE Model with a PrimaryPart + optional `kind` tag; `ungroup`; `weld` WeldConstraints an assembly to one anchored root. NOTE the parametric builders ALREADY group each sub-unit into its own `Kind`-tagged Model — use this for hand-built/ungrouped geometry or after edits. |
 | `rbx_console(limit?,errorsOnly?,filter?)` | Read Studio's edit-time output log (prints/warnings/errors) in-channel. For PLAY-mode logs the official `get_console_output` is better. |
-| `rbx_build(spec)` | Quick primitives: slab / room / stairs (door+window openings) / furniture: **cabinet / table (coffee/dining) / shelf (bookcase) / bed / chair / sofa / armchair / desk / nightstand / dresser / wardrobe / fridge / stove / toilet / bathtub**, and **`prop`** = a generic primitive composer (`parts:[{shape:box/cylinder/ball/wedge, pos,size,rot,color,material,neon,light}]` → ANY small prop like a cigarette/mug/lamp, no execute_luau; cylinder length is along its LOCAL X, rotate to orient; rbx_qa AABB is rotation-blind so it false-flags rotated cylinders — trust the capture). All face **+Z**; storage pieces (cabinet/desk/nightstand/dresser/wardrobe/fridge/stove) get real drawers/doors + the ProximityPrompt controller. All carcass/furniture use **butt joinery, z-fight-/gap-free by construction** — prefer over hand-writing geometry. `cabinet` = carcass + `front` layout of `[{type:'drawers',count},{type:'doors',count}]` (drawers are **real pull-out boxes** — joined tray + pull + ProximityPrompt, NOT bare faceplates; doors w/ tight reveal, outer-edge hinge, **swing outward**, knob) + controller Script (ProximityPrompt opens/pulls them); optional `toeKick`/`countertop`/`backsplash`, `style:'shaker'` (frame+recessed panel doors, `panelColor`), and **`sink`** = `{width,depth,offset,basinDepth,basinColor,faucet}` cuts a basin hole THROUGH the countertop + carcass top (counter becomes a 4-strip frame, top splits) and drops in a basin + gooseneck faucet so it's **not capped by counter blocks** — put doors (or nothing), not drawers, in the section under the sink. `table` = top + 4 inset legs. `shelf` = carcass + N `shelves` boards (cleared off the back). `bed` = frame + Fabric mattress + headboard + pillow (`mattressColor`). Returns part count **+ bbox**. |
+| `rbx_live_sync_start(intervalMs?)` / `rbx_live_sync_stop` | Start or stop the plugin-side Studio-to-browser autosync. It starts enabled by default; interval is 100–60000ms (default 1500ms). The browser remains read-only; staged changes still require explicit commit. |
+| `rbx_build(spec)` | Quick primitives: slab / room / stairs (door+window openings) / furniture: **cabinet / table (coffee/dining) / shelf (bookcase) / bed / chair / sofa / armchair / desk / nightstand / dresser / wardrobe / fridge / stove / toilet / bathtub**, and **`prop`** = a generic primitive composer (`parts:[{shape:box/cylinder/ball/wedge, pos,size,rot,color,material,neon,light}]` → ANY small prop like a cigarette/mug/lamp, no execute_luau; cylinder length is along its LOCAL X, rotate to orient; rbx_qa is rotation-aware now (worldAABB + GetPartsInPart); its hits are real). All face **+Z**; storage pieces (cabinet/desk/nightstand/dresser/wardrobe/fridge/stove) get real drawers/doors + the ProximityPrompt controller. All carcass/furniture use **butt joinery, z-fight-/gap-free by construction** — prefer over hand-writing geometry. `cabinet` = carcass + `front` layout of `[{type:'drawers',count},{type:'doors',count}]` (drawers are **real pull-out boxes** — joined tray + pull + ProximityPrompt, NOT bare faceplates; doors w/ tight reveal, outer-edge hinge, **swing outward**, knob) + controller Script (ProximityPrompt opens/pulls them); optional `toeKick`/`countertop`/`backsplash`, `style:'shaker'` (frame+recessed panel doors, `panelColor`), and **`sink`** = `{width,depth,offset,basinDepth,basinColor,faucet}` cuts a basin hole THROUGH the countertop + carcass top (counter becomes a 4-strip frame, top splits) and drops in a basin + gooseneck faucet so it's **not capped by counter blocks** — put doors (or nothing), not drawers, in the section under the sink. `table` = top + 4 inset legs. `shelf` = carcass + N `shelves` boards (cleared off the back). `bed` = frame + Fabric mattress + headboard + pillow (`mattressColor`). Returns part count **+ bbox**. |
 | `rbx_insert(assetId,name?,parent?,position?,anchored?)` | Insert a marketplace/toolbox asset by **numeric id** (InsertService:LoadAsset), anchored + parented/positioned/renamed. Asset must be FREE or owned. BuildKit's own `insert_model` — no official MCP needed. (`generate_mesh` + play-mode start/stop are privileged Roblox APIs a third-party plugin **can't** do — those still need the official MCP.) |
 | `rbx_edit(target,op,...)` | Modify existing: move/rotate/scale/recolor/material/**anchor**/rename/delete/clone. One undo step each; returns **`movedBy`/`sizeDelta`** diff. `anchor` (anchored bool) fixes `rbx_qa` unanchored warnings. |
 | `rbx_batch(ops[])` | Several `build`/`edit` ops in one call = **one undo step + one round trip** (place N props, multi-edit a model). Atomic: any op fails → whole batch reverts. ops = `[{action,args}]`. |
-| `rbx_qa(target,fix?,fit?)` | Geometric lint: unanchored parts, duplicate placements, deep overlaps, **z-fights** (coplanar same-direction surfaces overlapping → the flicker; clean butt joints are NOT flagged), **unjoined assembly pieces** (per leaf Model, connected-components: a drawer front split from its tray → "X splits into N groups, gap g"; cross-model sliding clearances NOT flagged), part-budget. `fix:true` nudges z-fighting parts 0.06 apart (one undo). `fit:true` adds the **cross-assembly** check — pieces from DIFFERENT sub-models whose faces nearly meet but leave a visible slot (a leg short of the floor, a drawer front not filling its opening); intended slide clearances are excluded via the `Kind` attribute, but it's rotation-approximate so VERIFY each hit against a capture. Pair with orbit/floor_plan for visual QA. |
+| `rbx_qa(target?,fix?,fit?,region?)` | Geometric lint: unanchored parts, duplicate placements, deep overlaps, **z-fights**, **unjoined assembly pieces**, and part-budget. `fit:true` adds cross-assembly seam detection. **`region` is a confirmed no-op (live-tested 2026-08-30 — radius 3/14/25 and no region at all all returned byte-identical results); do not rely on it to scope a map-block QA pass.** Use `target:'InstanceName'` instead, or a whole-workspace scan and expect noise from unrelated objects. Verify approximate fit hits against a capture. |
 | `rbx_navcheck(from,to,agentRadius/Height/CanJump,visualize?)` | **Walkability QA:** PathfindingService between two points (instance name or `[x,y,z]`) → reachable?/path length/waypoint+jump counts; `visualize:true` draws neon path dots (jumps orange) under `workspace.BuildKitNavPath`. Official `character_navigation` only DRIVES a char; this QAs whether a layout is navigable. |
 | `rbx_tag(mode,target?,tag?)` | CollectionService tags (gameplay wiring): `add`/`remove` (one undo) / `list` a target's tags / `query` every instance with a tag. Cheaper + multi-agent-safe vs `execute_luau`. |
 | `rbx_attr(mode,target,name?,value?)` | Instance Attributes: `set` (one undo; value = string/number/bool or `[x,y,z]`→Vector3) / `get` / `list`. Gameplay state without raw luau. |
@@ -64,13 +65,139 @@ run `npm run build` (compiles `dist/`, regenerates + installs the `.rbxmx`) and 
 | **play-mode testing** | **PRIMARY:** official `mcp__Roblox_Studio__execute_luau` `datamodel_type:"Server"` (or `"Client"`) after `start_stop_play(true)` — arbitrary Luau in the LIVE game, returns data, zero setup. **LAST RESORT:** `rbx_runtime(install)` + `rbx_run(code,timeout)` for a *persistent/parallel* in-game channel (resident coroutine holding state across calls) — but you must first **manually tick `ServerScriptService.LoadStringEnabled` in Properties** (not script-settable); `rbx_run` returns a clear "tick LoadStringEnabled" error until you do. Then `remove` when done. |
 
 **Gotchas:**
-- Captures include full Studio chrome. Close **Explorer + Output** panels for max viewport.
+- OS fallback captures crop to the reported 3D viewport when possible; otherwise they return the full Studio client area.
 - **CAPTURE PRIMARY: the official `mcp__Roblox_Studio__screen_capture`, ALWAYS first.** Get coords from `rbx_frame(target, view OR azimuth/elevation)` (or `execute_luau`: `cam = center + dir.Unit * (size.Magnitude/2 / tan(rad(fov)/2))`), feed `camera_position`+`look_at_position` to `screen_capture`. Clean (NO chrome) and works even when Studio is **backgrounded or MINIMIZED**. For a turntable, loop `rbx_frame(azimuth=...)` → `screen_capture` per angle. `iso` is steep on tall builds; use a low 3/4 like `Vector3.new(0.8,0.38,1).Unit`.
-- **`rbx_capture`/`rbx_orbit`/`rbx_watch` grab the OS window**, so Studio must be the VISIBLE FOREGROUND window (they read screen pixels; they grab the WRONG window or get cropped when Studio is hidden, and pop Studio to the front), and their frames include Studio chrome. (PrintWindow can't read Studio's hardware-accelerated viewport — comes back black — so this can't be made background-safe.) Reach for them when you want what they ADD over a plain screenshot: guaranteed setup/teardown, batched angles, timed sampling. For a plain shot, use `rbx_frame` → official `screen_capture`.
+- **`rbx_capture`/`rbx_orbit`/`rbx_watch` grab the OS window**, so Studio must be the VISIBLE FOREGROUND window. They crop to the reported viewport when possible and fall back to the full client area otherwise. Reach for them when you want guaranteed setup/teardown, batched angles, or timed sampling. For a plain shot, use `rbx_frame` → official `screen_capture`.
 - If the official `Roblox_Studio` MCP errors "previously active Studio disconnected", call `list_roblox_studios` + `set_active_studio`.
 - Plugin can't `loadstring` — for arbitrary geometry use the official `execute_luau` (rich) and capture with buildkit. Use `execute_luau` for detailed builds; `rbx_build` only for simple shapes.
 - **Official Studio Script Sync exists** (Roblox, fully released): Studio ↔ local-files **bidirectional** sync with conflict resolution, works in external editors (VS Code/Cursor) and with Team Create. For ongoing development that's the native option; `rbx_sync` is the **agent-triggered, no-session, on-demand** push for the common case where a file didn't make it into Studio mid-build (new `.luau` → infinite-yield). Don't confuse the two: Script Sync is a user-configured live session; `rbx_sync` is a one-shot tool call.
 - **Move the player avatar in Play (it CAN walk, not just click):** official `user_*_input` only sends raw clicks/keys. To actually WALK the avatar, drive its Humanoid with `mcp__Roblox_Studio__execute_luau` `datamodel_type:"Client"`: `local c=game.Players.LocalPlayer.Character; c.Humanoid:MoveTo(Vector3.new(x,y,z)); c.Humanoid.MoveToFinished:Wait()`. For paths around obstacles, compute waypoints with **`rbx_navcheck`** (in edit) then `MoveTo` each in order. NPCs / server-owned characters move the same way via `datamodel_type:"Server"`. `MoveTo` is the reliable mover; input-sim (hold W) is timing-fragile.
+
+### PRIMARY PATH — try these four first (2026-08-30)
+
+49 `rbx_*` tools exist; these four cover most work. Everything below this block is the **specialist layer** — still valid, reach for it when the four don't cover the case.
+
+| Tool | Use |
+|------|-----|
+| `rbx_map({name/className/material/region/tag/selection/target, detail, lod, maxParts})` | **READ the live place as data.** `name` is a glob (`'Oak*'`); `region` is `{center,radius}` or `{min,max}`; `selection:true` maps what the user clicked in Studio. `detail:'summary'` (default) → counts + bounds + samples; `detail:'parts'` → every match. `lod:'bbox'` → one box per target. `maxParts` ≤800. **`region` is applied AFTER the 800-part cap, not before (confirmed bug, unfixed) — a populated region past the 800th part comes back empty.** Don't read "0 parts" as "nothing there"; narrow `target` too, or cross-check with `rbx_view`. **Use instead of** describe/inspect/find/scene_dump for most reads — it returns a scoped subgraph, not a dump. |
+| `rbx_view({target, view, elevation, zoom, angles, isolate, cutaway, cutawayY, annotate, contrast, restore})` | **LOOK, with camera + visibility composed into ONE call.** `view`: front/back/left/right/iso/top. `angles` 1–24 = turntable contact sheet. `isolate` hides everything else; `cutaway:'roof'` or `cutawayY:<n>` cuts the top off; `annotate` overlays bbox+dims; `contrast` recolors so seams/gaps pop. `restore` defaults **true** (undoes camera+visibility after). **Replaces** capture/orbit/floor_plan/frame/isolate/annotate chains — "isolate the sink, cut the roof, 4 annotated angles" is one call. |
+| `rbx_apply({ops:[…], view?})` | **EDIT existing content**, all ops in ONE atomic Studio undo step. Each op takes `target` **or** a `select` filter (same shape as `rbx_map`) — so "move all 47 trees up 2" is **one op, not 47**. Ops: `move`(delta) `rotate`(degrees) `scale` `recolor`(color) `material` `anchor` `rename` `delete` `clone`(offset) plus **`replace`**(spec) **`scatter`**(count/region/seed) **`distribute`**(from/to) **`align`**(axis/value). Optional `view` renders after the edit — don't spend a separate capture call. |
+| `rbx_dev_reload()` | **After editing `src/*.ts`.** Rebuilds, swaps the stale viewer server, verifies old→new PID. A plain `/mcp` reconnect often re-attaches to the **OLD process**, so changes silently don't take effect (this cost ~30 wasted calls in one session). Refuses to kill the current MCP process or a listener whose ownership changed mid-build. |
+
+**`rbx_view` has no `azimuth` and no `hide[]`** — use named `view` + `elevation`, or `angles` for a turntable.
+
+### World-building tools added 2026-08-30 (built + build-clean; live-test each before trusting)
+
+| Tool | Use |
+|------|-----|
+| `rbx_place({prefab,...})` | **Place many instances from ONE instruction — the map-building verb.** `mode:'palette'` lists prefabs. Give one verb: `place`, `line`, `grid`, `ring`, or `scatter`. For straight lines/grids, `abut:true` derives spacing from the prefab bbox (manual spacing is then rejected) and the response includes O(n) adjacent `gaps`. Other shared modifiers: `ground`, `snap`, `rotate`, `jitter`, `seed`. Clones land in one undoable `Placements/<name>` group; max 500. |
+| `rbx_terrain({mode,shape,...})` | **The voxel layer — BuildKit had NO terrain surface before this.** `mode:'fill'` + `shape` block/ball/cylinder/wedge/region; `'clear'` (a region, or ALL terrain if min/max omitted); `'paint'` swaps `from`→`to` material in a region. 22 terrain materials (grass sand rock slate concrete brick sandstone mud basalt ground crackedlava asphalt cobblestone ice leafygrass salt limestone pavement snow woodplanks water air). **Regions snap outward to the 4-stud voxel grid** and FillRegion/ReplaceMaterial require resolution 4. Use terrain for ground/hills/water, parts for built form. |
+| `rbx_collision({mode,...})` | Collision groups: `list` / `create` / `delete` / `assign` (target/targets/select) / `collidable` (name+other+canCollide). Lets scenery stop blocking NPCs **without** switching CanCollide off. |
+| `rbx_sound({mode,...})` | `add`/`remove`/`list`. Parented to a BasePart = positional 3D audio; no target = SoundService ambience. `soundId` takes a bare number or `rbxassetid://`. |
+| `rbx_constraint({mode,kind,a,b,...})` | Real physical joints — the articulation ProximityPrompt scripts can't do. kind: hinge/weld/motor/spring/prismatic/ball/rope/rod. Attachment kinds take `offsetA`/`offsetB` + `axis`; hinge also `limits`+`lower`/`upper`, or `motor`+`velocity`/`torque`. `weld` uses WeldConstraint on the parts; Motor6D uses C0/C1 (it takes no attachments). |
+
+`rbx_apply`'s `distribute` also gained **`via`** — a control point that bends the run into a quadratic Bezier, so fences/lamp lines can follow a curve instead of only a straight line.
+
+---
+
+**The other `rbx_*` tools are the SPECIALIST LAYER** — capture / orbit / watch / floor_plan / describe / inspect / find / cast / script / prop / group / console / checkpoint / restore / diff / optimize / navcheck / measure / selection / tag / attr / sync / gui / set_lighting / insert / gen_mesh / batch / undo / stage_* / live_sync_* / scene_dump / run / runtime / use_place / status / isolate / annotate / qa. Reach for them only when the four primary tools above don't cover the case.
+
+**Gotchas:**
+- OS fallback captures crop to the reported 3D viewport when possible; otherwise they return the full Studio client area.
+- **CAPTURE PRIMARY: the official `mcp__Roblox_Studio__screen_capture`, ALWAYS first.** Get coords from `rbx_frame(target, view OR azimuth/elevation)` (or `execute_luau`: `cam = center + dir.Unit * (size.Magnitude/2 / tan(rad(fov)/2))`), feed `camera_position`+`look_at_position` to `screen_capture`. Clean (NO chrome) and works even when Studio is **backgrounded or MINIMIZED**. For a turntable, loop `rbx_frame(azimuth=...)` → `screen_capture` per angle. `iso` is steep on tall builds; use a low 3/4 like `Vector3.new(0.8,0.38,1).Unit`.
+- **`rbx_capture`/`rbx_orbit` are the OS-grab FALLBACK only** — they need Studio to be the VISIBLE FOREGROUND window. Use them only when the official path isn't an option. (PrintWindow can't read Studio's hardware-accelerated viewport, so the OS grab can't be made background-safe.)
+- If the official `Roblox_Studio` MCP errors "previously active Studio disconnected", call `list_roblox_studios` + `set_active_studio`.
+- Plugin can't `loadstring` — for arbitrary geometry use the official `execute_luau` (rich) and capture with buildkit. Use `execute_luau` for detailed builds; `rbx_build` only for simple shapes.
+- **Official Studio Script Sync exists** (Roblox, fully released): Studio ↔ local-files **bidirectional** sync with conflict resolution, works in external editors (VS Code/Cursor) and with Team Create. For ongoing development that's the native option; `rbx_sync` is the **agent-triggered, no-session, on-demand** push for the common case where a file didn't make it into Studio mid-build (new `.luau` → infinite-yield). Don't confuse the two: Script Sync is a user-configured live session; `rbx_sync` is a one-shot tool call.
+- **Move the player avatar in Play (it CAN walk, not just click):** official `user_*_input` only sends raw clicks/keys. To actually WALK the avatar, drive its Humanoid with `mcp__Roblox_Studio__execute_luau` `datamodel_type:"Client"`: `local c=game.Players.LocalPlayer.Character; c.Humanoid:MoveTo(Vector3.new(x,y,z)); c.Humanoid.MoveToFinished:Wait()`. For paths around obstacles, compute waypoints with **`rbx_navcheck`** (in edit) then `MoveTo` each in order. NPCs / server-owned characters move the same way via `datamodel_type:"Server"`. `MoveTo` is the reliable mover; input-sim (hold W) is timing-fragile.
+
+
+## THE BUILD LOOP — generator files → live browser preview → port (2026-08-30)
+
+**This is now the main way to build.** Building is a **file edit, not a tool call.** Don't reach for `rbx_build`/`rbx_stage_build` with a big inline part list — an inline 70-part prop costs ~4–5k tokens and re-sends *everything* on every tweak; a generator file is an `Edit` of two lines.
+
+1. **Write/edit `roblox-buildkit-mcp/generators/<name>.js`** — every `*.js` there contributes to the stage. Export a **synchronous** `generate(args)` returning the same validated ops `rbx_batch` takes:
+   ```js
+   export function generate() {
+     return [{ action: "build", args: {
+       kind: "prop", name: "Oak", center: [0, 2, 0],
+       parts: [{ shape: "box", size: [4, 4, 4], color: [120, 80, 40] }],
+     } }];
+   }
+   ```
+2. The server **watches `generators/`**, debounces each save, re-runs the file, and pushes a full `stage-sync` to the browser. A syntax/runtime/validation error **keeps that file's last good ops** and surfaces in the panel — a broken edit never blanks the scene.
+3. **Preview: <http://localhost:8642/stage.html>** (auto-served by the MCP process on `127.0.0.1`). Toggle generator files from their entries in the Library panel.
+4. **Port to Roblox** — you click the toolbar button, or call `rbx_stage_commit`. Commits the *enabled* preview.
+
+**Prefer recursion over hand-placement.** A `branch(pos, dir, depth)` that recurses is shorter *and* produces better organic geometry than 14 hand-computed branches.
+
+**The editor (stage.html):** WASD + Q/E fly camera, click-to-select w/ blue highlight, **Explorer** tree (models → unions → parts), **Properties** panel (pos/size/rot/color/material/CSG op), TransformControls **Move/Rotate/Scale** gizmo (**F/R/G** shortcuts), **Undo Ctrl+Z / Redo Ctrl+Y or Ctrl+Shift+Z**, Delete, **CSG edit/preview toggle**, Recent stages w/ save + **Export `.bkstage`**.
+
+**`.bkstage`** = the share format: pure validated ops + metadata, no engine/machine state, so it reproduces byte-identically for anyone who imports it.
+
+**The server owns the truth.** Browser edits POST to the server, which mutates and broadcasts back — so what's previewed is byte-identical to what commits. Never work around this by holding authoritative state in the page.
+
+### Headless prop-subagent workflow
+
+Run independent prop briefs in parallel with one unique `session` ID per subagent (maximum
+six active sessions):
+
+| Step | Tools |
+|------|-------|
+| Build and inspect | `rbx_stage_build`, `rbx_stage_status` |
+| Self-check and iterate | `rbx_stage_render` |
+| Reset the isolated bench | `rbx_stage_clear` |
+| Save and gather winners | `rbx_library_save`, `rbx_library_list`, `rbx_library_category_create` |
+
+**Hard rule:** a prop subagent never calls Studio/bridge tools or `rbx_stage_commit`.
+It saves its result to the library; the user explicitly ports chosen winners later.
+
+### STAGE vs MIRROR — two different surfaces, don't conflate them
+
+| | **Stage** (`/stage.html`) | **Mirror** (`/stage.html?mirror=1`) |
+|---|---|---|
+| What it is | A **construction bench**. Props get built here. | A **reflection of the real place** in Studio. |
+| Source of truth | `generators/*.js` + manual staged ops | Studio, via live-sync `scene_dump` |
+| Explorer shows | **generator file → op → primitive**, with primitive count and the live `csg N/max` budget | the **Studio instance tree** (Models/Unions/paths), hierarchy-preserving |
+| Editing | full: gizmo, properties, delete, undo/redo, clipboard | read-only (per-instance edits go through `rbx_apply`) |
+| Flow | build → preview → **Port to Roblox** | inspect what actually landed, then adjust in Studio |
+
+`index.html` now just redirects to `stage.html?mirror=1` — one page, two modes.
+
+**Stage editor extras:** `▶ Build` replays the build in construction order with a scrubber and an `auto` toggle (replays on every stage-sync) — the fastest way to see *where* a generator goes wrong rather than just that it did. Explorer has a search box (filters, auto-expands, keeps ancestors for context) and collapsible groups whose state survives re-render. `Ctrl+C`/`Ctrl+V`/`Ctrl+D` copy/paste/duplicate an op — or a single primitive inside a prop, which becomes a prop of its own. CSG (`csg:true` + per-part `op`) survives the round-trip.
+
+**Mirror is read-only.** It exposes the Studio hierarchy in Explorer, but no Properties, Library, History, or transform gizmos. Use Studio or `rbx_apply` for edits.
+
+**Mirror extras:** clicking any node — part **or** Model/group — offers **Copy "X" to stage**, which converts it back into build ops and appends them, so something built in Studio can be pulled into the stage to save or export as `.bkstage`. A union copies as its **source parts + `csg:true`**, so the copy rebuilds the real solid rather than a bounding box. **`Locked` parts cannot be clicked or marquee-picked** in the viewport (matching Studio) but stay selectable from the Explorer, marked 🔒.
+
+**Generator ops are NOT editable in the stage** — the file is the source of truth and would regenerate them on the next save, so patch/delete refuse. Use **Detach** to copy that file's ops into the manual stage and disable the file; then they're freely editable. (Delete names the owning file rather than erroring cryptically.)
+
+### CSG booleans
+Set `csg:true` on a prop spec, then per-part **`op:"union"|"subtract"|"intersect"`** (legacy `negate:true` == `subtract`). Roblox has all three natively (`UnionAsync`/`SubtractAsync`/`IntersectAsync`). The stage previews the same boolean result via `three-bvh-csg`.
+**Above the cap, `csgProp` skips CSG entirely** and leaves the parts unmerged — not an error, but it reads as one if you don't expect it. The cap is **configurable: default 100**, set stage-wide in the viewer (Options -> CSG max parts) or per-op via `csgMax` in a build spec, which always wins. The viewer reports the LARGEST single prop against the cap (the budget is per-prop, not a scene total). 100 is a useful default, not a safe ceiling — Roblox unions degrade past roughly a 20k-triangle budget and where that bites depends on geometry, so lower it if a union comes out degenerate.
+
+
+## Coordinate & rotation traps (cost hours on 2026-08-30 — read before touching the viewer)
+
+- **Roblox is RIGHT-handed Y-up, exactly like three.js** (`CFrame.LookVector` is its −Z column). The viewer originally assumed left-handed and negated Z plus two Euler angles — that silently mirrored the whole scene. Because the position mirror and the angle flips didn't correspond, compound-angle geometry came apart: tree limbs drooped instead of sweeping up and detached from the trunk. **Vertical trunks and radially symmetric roots hid it**, which is why it survived so long. The correct conversion is the **identity**.
+- **TWO rotation conventions exist and look identical in JSON — never convert with plain `radToDeg`:**
+  - `CFrame:ToOrientation()` (what `scene_dump` emits) → **radians, YXZ order**
+  - `BUILD_SPEC` part `rot` (what `CFrame.Angles` consumes) → **degrees, XYZ order**
+  Converting between them requires **re-decomposing through a quaternion**, not a unit change. Decoding one as the other is what made rebuilt branches point the wrong way.
+- **A union dumps only as its BOUNDING BOX** — the plugin cannot read a `PartOperation`'s real solid back out of Studio. `buildProp` therefore snapshots the source parts' **world transforms** (via `ToOrientation`, so there's one convention end to end) into a `BuildKitCsgParts` attribute *before* `csgProp` destroys them; the viewer re-evaluates the boolean with `three-bvh-csg`. **Props built before that landed have no stash and render as translucent boxes — rebuild them to fix.**
+- Unions/intersects/negates render **translucent with edge lines and `depthWrite:false`** when their true solid isn't recoverable, so they can never hide what's behind them. Detection keys on the dumped **`class`** (present all along), not `shape`, so it works without a plugin restart.
+- **Roblox's built-in materials are engine-internal** — no asset id, nothing for `/asset/:id` to fetch. The viewer synthesises a grayscale detail map per family (wood grain, leaf mottle, brick courses, weave, stone noise); three.js multiplies `map` by `color` the same way Roblox modulates a material by part Color, so hue is preserved. Real `SurfaceAppearance`/`Texture` assets override it.
+
+## buildkit gotchas (2026-08-30)
+
+- **`rbx_apply`'s `expandApply` deleted `args.op`** in its default path, so **all nine plain edit ops (move/rotate/scale/recolor/material/anchor/rename/delete/clone) failed with `unknown edit op: nil`**. Fixed; no test covered it. If a bulk edit ever fails that way again, check that translation layer first.
+- **`1e9` fails the plugin build gate** — `check-plugin.mjs`'s identifier scan reads `e9` as an unknown symbol. Use plain integers in plugin Luau.
+- **`check-plugin.mjs` has a hand-maintained `HANDLERS` allowlist and `EDGES` cross-module list.** A new handler or a new cross-module import must be added there or `npm run build` fails (clear `G4`/scope errors, just non-obvious the first time).
+- **`10-geometry.luau` has no `HttpService` import** (see EDGES). Pass JSON through as a string and let the browser parse rather than adding the import.
+
+- **`rbx_qa` is rotation-AWARE (verified 2026-08-30) — do NOT dismiss its overlap/z-fight hits as false positives.** `worldAABB` projects each part's true oriented box onto world axes and gates against real geometry with `GetPartsInPart`, so rotated cylinders and clustered foliage are judged correctly. Any older note calling it "rotation-blind" describes pre-fix code and is WRONG — acting on it means ignoring real defects. The live limits are the 1200-part ceiling and the approximate `fit` check, not rotation.
+- **Stale MCP process is the #1 time-waster — use `rbx_dev_reload()`.** After `src/*.ts` changes, `/mcp` reconnect frequently re-attaches to the **old already-running process**, so the new code never loads and you debug a phantom. Symptom: a change provably in `dist/` has no effect. `rbx_dev_reload()` rebuilds + swaps + verifies old→new PID. Manual check: `Get-NetTCPConnection -LocalPort 8642 -State Listen` before/after — if the PID didn't change, nothing reloaded. **Assume this first whenever a change "isn't taking effect".**
+- **Prefer browser-side changes over server-side.** `viewer/*.js` + `viewer/*.html` are served from disk — a page refresh is enough. `src/*.ts` needs rebuild → process swap → PID verify. Same feature, wildly different iteration cost.
 
 ## Core workflow: see-as-you-build
 
@@ -338,6 +465,7 @@ Leave the Explorer clean — never a flat pile of "Part".
 
 ## buildkit gotchas
 
+- `rbx_build` prop CSG accepts per-part `op:'union'|'subtract'|'intersect'`; the legacy `negate:true` field remains an alias for `op:'subtract'`.
 - **`rbx_build` prop ships a `BuildKitRegen` script** that, on a `Scale`-attr change (or an undo / plugin re-run), DESTROYS every direct-child BasePart and rebuilds from the `BuildKitParts`/`BuildKitSpec` attributes. Hand-editing a prop's parts then silently reverts to the canonical prop. To detach a prop for hand-rigging: delete the `BuildKitRegen` script AND the `BuildKitParts`/`BuildKitSpec`/`BuildKitKind`/`Scale` attributes first. (A nested child *Model* survives — only direct-child BaseParts get wiped.)
 - **The official `screen_capture` sometimes ignores a typed `camera_position`** and grabs a stale/previous view. Pass the FULL-PRECISION coords straight from `rbx_frame` (don't round them); when a capture looks wrong, re-issue with the exact `rbx_frame` output.
 - **Tilted hinge parts** (a faceted/curved lid built from parts tilted about X) still hinge about world X, but compute the local pivot via `part.CFrame:PointToObjectSpace(worldHingePoint)` — `worldPoint - center` only works for axis-aligned parts.

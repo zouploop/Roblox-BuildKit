@@ -246,7 +246,7 @@ describe("endpoint guards", () => {
   it("rejects browser-origin requests to the plugin endpoints", async () => {
     const port = await freePort();
     await startBridge(port);
-    for (const [method, path] of [["GET", "/poll?place=P"], ["POST", "/result"], ["POST", "/submit"]] as const) {
+    for (const [method, path] of [["GET", "/poll?place=P"], ["POST", "/result"], ["POST", "/mirror"], ["POST", "/submit"]] as const) {
       const withOrigin = await req(port, method, path, {}, { Origin: "https://evil.example" });
       expect(withOrigin.status, `${method} ${path} with Origin`).toBe(403);
       const withFetchSite = await req(port, method, path, {}, { "Sec-Fetch-Site": "cross-site" });
@@ -277,6 +277,7 @@ describe("endpoint guards", () => {
     for (const [method, path] of [
       ["GET", "/poll?place=P"],
       ["POST", "/result"],
+      ["POST", "/mirror"],
       ["POST", "/submit"],
       ["POST", "/config"],
       ["GET", "/places"],
@@ -296,6 +297,28 @@ describe("endpoint guards", () => {
     const res = await req(port, "GET", "/places", undefined, { "X-BuildKit-Token": "s3cret" });
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toHaveProperty("places");
+  });
+
+  it("delivers a valid plugin mirror push to the registered handler", async () => {
+    const port = await freePort();
+    const b = await startBridge(port);
+    const received: Array<{ place: string; dump: unknown }> = [];
+    b.setMirrorHandler((place, dump) => {
+      received.push({ place, dump });
+      return true;
+    });
+    const dump = { parts: [{ name: "Part", pos: [0, 1, 0] }], dumped: 1, totalParts: 1, truncated: false };
+    const res = await req(port, "POST", "/mirror", { place: "TestPlace", dump }, { "Content-Type": "application/json" });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+    expect(received).toEqual([{ place: "TestPlace", dump }]);
+  });
+
+  it("rejects malformed plugin mirror pushes", async () => {
+    const port = await freePort();
+    await startBridge(port);
+    const res = await req(port, "POST", "/mirror", { place: "TestPlace", dump: {} }, { "Content-Type": "application/json" });
+    expect(res.status).toBe(400);
   });
 
   it("serves a poll with X-BuildKit-Auth: ok when the token is validated", async () => {

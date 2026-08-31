@@ -19,9 +19,11 @@ restart Studio, run the affected tool, watch Output for errors.
 
 ## Committing
 
-- **`plugin/BuildKitPlugin.rbxmx` is generated from `plugin/BuildKitPlugin.luau`.** Edit the
-  `.luau`, run `npm run build` (or `node scripts/gen-rbxmx.mjs`), and commit **both** files
-  together. CI fails if the committed artifact is stale, and a lone `.luau` edit that skips
+- **The Luau source of truth is `plugin/src/*.luau`** (ordered, numeric-prefixed modules).
+  Each source file is a ModuleScript with explicit imports and an export table.
+  `plugin/BuildKitPlugin.rbxmx` is the single generated artifact, produced by `npm run build`
+  (or `node scripts/gen-rbxmx.mjs`). Edit a module in `plugin/src/`, run the build, and commit
+  the regenerated artifact. CI fails if it is stale, and a lone `plugin/src/` edit that skips
   regeneration will be caught.
 - Keep the version single-sourced: it lives in `package.json` only (the server reads it at
   startup).
