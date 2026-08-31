@@ -2,7 +2,7 @@
 // Pairs with BuildKitPlugin (Luau) running in Studio: this process queues
 // commands the plugin executes in the Edit datamodel, and screenshots the
 // Studio window for captures the plugin has framed.
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { fileURLToPath } from "node:url";
@@ -103,6 +103,25 @@ async function run(action: string, args: unknown, timeoutMs = 30_000) {
 
 const server = new McpServer({ name: "roblox-buildkit", version: SERVER_VERSION });
 
+type ToolCatalogEntry = {
+  handle: RegisteredTool;
+  title?: string;
+  description?: string;
+};
+
+// Keep registration syntax unchanged while retaining the SDK handles needed to toggle
+// visibility in tools/list. The SDK's registerTool config has no enabled field; disable
+// handles after every tool has been registered, before the stdio transport connects.
+const toolCatalog = new Map<string, ToolCatalogEntry>();
+const nativeRegisterTool = server.registerTool.bind(server);
+const registerTool = ((name: string, config: any, callback: any) => {
+  const handle = nativeRegisterTool(name, config, callback);
+  if (handle) {
+    toolCatalog.set(name, { handle, title: config.title, description: config.description });
+  }
+  return handle;
+}) as McpServer["registerTool"];
+
 const VIEWS = ["front", "back", "left", "right", "iso", "top"] as const;
 const SYNC_REGION = z.union([
   z.object({ center: z.array(z.number()).length(3), radius: z.number().positive() }),
@@ -110,208 +129,18 @@ const SYNC_REGION = z.union([
 ]);
 
 // --- capture: frame a target and screenshot the Studio window ----------------
-server.registerTool(
-  "rbx_capture",
-  {
-    title: "Capture with scene setup (atomic)",
-    description:
-      "One shot with scene setup APPLIED AND UNDONE around it, whatever happens — cutaway above a Y plane (cutawayY) or the model top (cutaway='roof'), isolate, annotate, contrast. " +
-      "That teardown is the reason to use this: doing it by hand is rbx_isolate(on) -> rbx_frame -> screen_capture -> rbx_isolate(off), and anything that interrupts you between the last two leaves the scene hidden or recolored. " +
-      "For a PLAIN screenshot with no setup, prefer rbx_frame + the official mcp__Roblox_Studio__screen_capture: cleaner (no Studio chrome) and works when Studio is backgrounded. " +
-      "This grabs the OS window, so Studio must be the visible foreground window, and it pops Studio to the front.",
-    inputSchema: {
-      target: z.string().optional().describe("Instance name to frame (searched recursively). Omit = whole workspace."),
-      view: z.enum(VIEWS).optional().describe("Camera angle. Default 'iso'."),
-      zoom: z.number().optional().describe("Fit multiplier; >1 zooms out. Default 1.1."),
-      cutaway: z.enum(["none", "roof"]).optional().describe("'roof' hides the top slice of the target."),
-      cutawayY: z.number().optional().describe("Hide every part whose center Y is above this world height (overrides cutaway)."),
-      isolate: z.boolean().optional().describe("Hide everything except the target for this one shot (needs target)."),
-      annotate: z.boolean().optional().describe("Overlay a bbox outline + W×H×D dimension label on the target (needs target)."),
-      contrast: z.boolean().optional().describe("Recolor the target high-contrast so seams/gaps pop (gap-inspection; pair with isolate)."),
-    },
-  },
-  async (a) => {
-    // All scene mutations (cutaway/isolate/annotate/contrast/save_camera) live in the SAME try
-    // whose finally tears them down — so a throw partway through setup can't leave the editor
-    // cut-away/isolated/recolored with no restore. Teardown is guarded by each token/flag.
-    let token: string | null = null;
-    let isoToken: string | null = null;
-    let saved: any = null;
-    try {
-      if (a.cutawayY !== undefined || a.cutaway === "roof") {
-        // Explicit mode so the plugin knows what "roof" means instead of guessing from a
-        // missing `y`: mode="y" hides above a world height, mode="roof" hides the model's
-        // top slice. (Previously only `y` was sent, so 'roof' silently fell back to the
-        // plugin's generic default.)
-        const cutArgs = a.cutaway === "roof" ? { target: a.target, mode: "roof" } : { target: a.target, mode: "y", y: a.cutawayY };
-        const cut = await bridge.sendCommand("cutaway", cutArgs);
-        token = cut?.token ?? null;
-      }
-      if (a.isolate && a.target) {
-        const iso = await bridge.sendCommand("isolate", { target: a.target, mode: "on" }, 60_000);
-        isoToken = iso?.token ?? null;
-      }
-      if (a.annotate && a.target) {
-        await bridge.sendCommand("annotate", { target: a.target, mode: "on" });
-      }
-      if (a.contrast && a.target) {
-        await bridge.sendCommand("contrast", { target: a.target, mode: "on" }, 60_000);
-      }
-      saved = await bridge.sendCommand("save_camera");
-      const framed = await bridge.sendCommand("frame", { target: a.target, view: a.view ?? "iso", zoom: a.zoom ?? 1.1 });
-      const b64 = await shot(saved?.viewport);
-      const tags = `${a.isolate ? " [isolated]" : ""}${a.annotate ? " [annotated]" : ""}${a.contrast ? " [contrast]" : ""}`;
-      return imageResult(b64, `framed ${a.target ?? "workspace"} view=${a.view ?? "iso"} size=${JSON.stringify(framed?.size)}${tags}`);
-    } catch (e) {
-      return errResult(e);
-    } finally {
-      await teardown([
-        saved ? { action: "restore_camera", args: saved } : null,
-        token ? { action: "restore", args: { token } } : null,
-        isoToken ? { action: "restore", args: { token: isoToken } } : null,
-        a.annotate && a.target ? { action: "annotate", args: { mode: "off" } } : null,
-        a.contrast && a.target ? { action: "contrast", args: { mode: "off" } } : null,
-      ]);
-    }
-  }
-);
+
 
 // --- floor plan: top-down with everything above the ceiling hidden -----------
-server.registerTool(
-  "rbx_floor_plan",
-  {
-    title: "Floor plan (top-down)",
-    description: "Top-down capture of a target with everything above ceilingY hidden, so the interior layout is readable.",
-    inputSchema: {
-      target: z.string().describe("Instance name to frame."),
-      ceilingY: z.number().describe("World Y height above which parts are hidden (the floor's ceiling level)."),
-      zoom: z.number().optional(),
-    },
-  },
-  async (a) => {
-    // Same single-try/finally discipline as rbx_capture: the cutaway is a scene MUTATION
-    // (parts get Transparency=1), so it must be applied inside the try whose finally undoes
-    // it. It used to sit outside, with save_camera between it and the try — a save_camera
-    // rejection (bridge timeout / plugin not polling) then skipped the finally entirely and
-    // left the scene cut away with the restore token stranded in this dead call.
-    let cut: any = null;
-    let saved: any = null;
-    try {
-      cut = await bridge.sendCommand("cutaway", { target: a.target, mode: "y", y: a.ceilingY });
-      saved = await bridge.sendCommand("save_camera").catch(() => null);
-      // Only frame (which forces CameraType=Scriptable) if save_camera succeeded — else the
-      // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays
-      // frozen. Matches the gate in rbx_orbit / rbx_watch.
-      if (!saved) {
-        return textResult(
-          "rbx_floor_plan: save_camera failed — skipping the shot to avoid locking the Edit camera. " +
-            "Bring Studio to the foreground and retry."
-        );
-      }
-      await bridge.sendCommand("frame", { target: a.target, view: "top", zoom: a.zoom ?? 1.05 });
-      const b64 = await shot(saved?.viewport);
-      return imageResult(b64, `floor plan of ${a.target} (hid ${cut?.hiddenCount} parts above y=${a.ceilingY})`);
-    } catch (e) {
-      return errResult(e);
-    } finally {
-      await teardown([
-        saved ? { action: "restore_camera", args: saved } : null,
-        cut?.token ? { action: "restore", args: { token: cut.token } } : null,
-      ]);
-    }
-  }
-);
+
 
 // --- orbit: turntable contact sheet (pseudo-3D) ------------------------------
-server.registerTool(
-  "rbx_orbit",
-  {
-    title: "Orbit turntable (N angles, one call)",
-    description:
-      "N evenly-spaced views orbiting a target at a fixed elevation (+ optional top/bottom), each frame LABELED with its azimuth/elevation, as ONE contact sheet — even spacing plus labels let the views fuse into a single volume. " +
-      "Use it to batch angles: n=12 here is one call instead of 24 (rbx_frame -> screen_capture per angle). Pair with rbx_describe. Restores the camera after. " +
-      "Trade-off: this grabs the visible OS window and only crops out Studio chrome when viewport detection succeeds. For a FEW high-quality angles, loop rbx_frame(azimuth,elevation) -> the official screen_capture instead.",
-    inputSchema: {
-      target: z.string().optional().describe("Instance to orbit (recursive). Omit = whole workspace."),
-      n: z.number().optional().describe("Evenly-spaced orbit angles. Default 8 (try 12 for detail; capped 24)."),
-      elevation: z.number().optional().describe("Camera elevation in degrees above horizon. Default 20."),
-      zoom: z.number().optional().describe("Fit multiplier; >1 zooms out. Default 1.15."),
-      top: z.boolean().optional().describe("Add a straight top-down frame. Default true."),
-      bottom: z.boolean().optional().describe("Add a straight bottom-up frame. Default false."),
-      isolate: z.boolean().optional().describe("Hide everything except target for the orbit (needs target) — floats it on the sky."),
-      contrast: z.boolean().optional().describe("Recolor the target's parts high-contrast so seams/gaps pop — gap-inspection mode (pair with isolate)."),
-    },
-  },
-  async (a) => {
-    const n = Math.max(2, Math.min(24, Math.floor(a.n ?? 8)));
-    const elev = a.elevation ?? 20;
-    const zoom = a.zoom ?? 1.15;
-    // Single try/finally: isolate/contrast/save_camera setup and teardown share one scope, so a
-    // throw during setup can't leak an isolated/recolored scene (was a nested-try leak before).
-    let isoToken: string | null = null;
-    let saved: any = null;
-    try {
-      if (a.isolate && a.target) {
-        const iso = await bridge.sendCommand("isolate", { target: a.target, mode: "on" }, 60_000);
-        isoToken = iso?.token ?? null;
-      }
-      if (a.contrast && a.target) {
-        await bridge.sendCommand("contrast", { target: a.target, mode: "on" }, 60_000);
-      }
-      saved = await bridge.sendCommand("save_camera").catch(() => null);
-      const shots: { az: number; el: number; label: string }[] = [];
-      for (let i = 0; i < n; i++) {
-        const az = Math.round((360 / n) * i);
-        shots.push({ az, el: elev, label: `az ${az}° el ${elev}°` });
-      }
-      if (a.top !== false) shots.push({ az: 0, el: 89, label: "top (el 89°)" });
-      if (a.bottom) shots.push({ az: 0, el: -89, label: "bottom (el -89°)" });
-      const content: any[] = [
-        { type: "text" as const, text: `orbit of ${a.target ?? "workspace"}: ${n} angles @ elev ${elev}° — fuse the labeled frames into one volume; pair with rbx_describe.` },
-      ];
-      // Only frame_dir (which forces CameraType=Scriptable) if save_camera succeeded — else the
-      // finally's `if (saved) restore_camera` is skipped and the user's Edit camera stays frozen.
-      // Skip the shot loop (finally still runs to undo isolate/contrast).
-      if (!saved) {
-        content.push({ type: "text" as const, text: "save_camera failed — skipping orbit frames to avoid locking the Edit camera. Bring Studio to the foreground and retry." });
-        return { content };
-      }
-      for (const s of shots) {
-        try {
-          await bridge.sendCommand("frame_dir", { target: a.target, azimuth: s.az, elevation: s.el, zoom }, FRAME_MS);
-          const b64 = await shot(saved?.viewport);
-          content.push({ type: "text" as const, text: `--- ${s.label} ---` });
-          content.push({ type: "image" as const, data: b64, mimeType: "image/png" });
-        } catch (e) {
-          content.push({ type: "text" as const, text: `${s.label}: ERROR ${e instanceof Error ? e.message : String(e)}` });
-        }
-      }
-      return { content };
-    } catch (e) {
-      return errResult(e);
-    } finally {
-      await teardown([
-        saved ? { action: "restore_camera", args: saved } : null,
-        isoToken ? { action: "restore", args: { token: isoToken } } : null,
-        a.contrast && a.target ? { action: "contrast", args: { mode: "off" } } : null,
-      ]);
-    }
-  }
-);
+
 
 // --- inspect: bounding box + counts ------------------------------------------
-server.registerTool(
-  "rbx_inspect",
-  {
-    title: "Inspect instance",
-    description: "Return bounding-box center/size, part count, and immediate children of a target (or whole workspace).",
-    inputSchema: { target: z.string().optional() },
-  },
-  async (a) => run("inspect", { target: a.target })
 
-);
 
-server.registerTool(
+registerTool(
   "rbx_build",
   {
     title: "Build primitive",
@@ -342,7 +171,7 @@ server.registerTool(
 );
 
 // --- Insert a marketplace/toolbox asset by id (no official insert_model needed) ---
-server.registerTool(
+registerTool(
   "rbx_insert",
   {
     title: "Insert asset by id",
@@ -363,7 +192,7 @@ server.registerTool(
 );
 
 // --- GUI: build a styled ScreenGui + render an edit-time preview --------------
-server.registerTool(
+registerTool(
   "rbx_gui",
   {
     title: "Build styled UI",
@@ -401,7 +230,7 @@ server.registerTool(
 );
 
 // --- GUI: toggle/clear the CoreGui edit preview ------------------------------
-server.registerTool(
+registerTool(
   "rbx_gui_preview",
   {
     title: "Toggle UI edit preview",
@@ -429,7 +258,7 @@ server.registerTool(
 );
 
 // --- lighting toggle for clear captures --------------------------------------
-server.registerTool(
+registerTool(
   "rbx_set_lighting",
   {
     title: "Set lighting",
@@ -441,7 +270,7 @@ server.registerTool(
 );
 
 // --- frame: compute camera coords WITHOUT moving the camera ------------------
-server.registerTool(
+registerTool(
   "rbx_frame",
   {
     title: "Frame coords (PRIMARY capture path)",
@@ -449,7 +278,7 @@ server.registerTool(
       "THE primary capture path. Compute camera_position + look_at_position framing a target's bbox, WITHOUT moving the camera, then feed them to the " +
       "official mcp__Roblox_Studio__screen_capture — a clean chrome-free shot that works even when Studio is BACKGROUNDED or MINIMIZED. " +
       "Use a named `view`, OR `azimuth`/`elevation` (degrees) for any angle — loop azimuths for a turntable, calling screen_capture each. " +
-      "Prefer this for a plain screenshot; reach for rbx_capture/rbx_orbit only for what they add (guaranteed cleanup, batched angles).",
+      "Prefer this for a plain screenshot; reach for rbx_view for guaranteed setup/teardown (isolate/cutaway/contrast) or a batched turntable.",
     inputSchema: {
       target: z.string().optional().describe("Instance name to frame (recursive). Omit = whole workspace."),
       view: z.enum(VIEWS).optional().describe("Named camera angle. Default 'iso'. (Ignored if azimuth/elevation given.)"),
@@ -475,7 +304,7 @@ server.registerTool(
 );
 
 // --- edit: transform/recolor/delete/clone an existing target -----------------
-server.registerTool(
+registerTool(
   "rbx_edit",
   {
     title: "Edit existing instance",
@@ -491,7 +320,7 @@ server.registerTool(
 );
 
 // --- qa: geometric lint ------------------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_qa",
   {
     title: "QA lint a build",
@@ -499,7 +328,7 @@ server.registerTool(
       "Geometric lint you can't eyeball: unanchored parts, duplicate-placed parts (same pos+size), deep interpenetrations, " +
       "Z-FIGHTS (coplanar/overlapping surfaces fighting over depth → the flicker), UNJOINED ASSEMBLY PIECES (a drawer front split from its tray, " +
       "a handle off its panel → 'X splits into N groups'), and part-budget warnings, plus the overall bounding box. " +
-      "Pair with rbx_orbit / rbx_floor_plan (or rbx_frame + screen_capture) for the visual side of QA. " +
+      "Pair with rbx_view (angles/isolate/cutaway) or rbx_frame + screen_capture for the visual side of QA. " +
       "fix=true auto-nudges each z-fighting part 0.06 off the shared plane (one undo step) — re-run to confirm. " +
       "fit=true adds the CROSS-ASSEMBLY fit check (see the field). It's opt-in and rotation-approximate, so VERIFY each hit against a capture.",
     inputSchema: {
@@ -521,7 +350,7 @@ server.registerTool(
 );
 
 // --- undo/redo Studio waypoints ----------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_undo",
   {
     title: "Undo / redo",
@@ -538,7 +367,7 @@ server.registerTool(
 // --- terrain: the voxel layer BuildKit never had -----------------------------
 // Terrain is a separate system from BaseParts; without this every hill/lake/cave fell
 // back to raw execute_luau. Voxels are on a 4-stud grid, so regions snap outward.
-server.registerTool(
+registerTool(
   "rbx_terrain",
   {
     title: "Sculpt Roblox Terrain",
@@ -567,7 +396,7 @@ server.registerTool(
 );
 
 // --- collision groups --------------------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_collision",
   {
     title: "Collision groups",
@@ -589,7 +418,7 @@ server.registerTool(
 );
 
 // --- sound -------------------------------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_sound",
   {
     title: "Place sounds",
@@ -612,7 +441,7 @@ server.registerTool(
 );
 
 // --- physical constraints ----------------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_constraint",
   {
     title: "Physical constraints (hinges, welds, motors)",
@@ -648,7 +477,7 @@ server.registerTool(
 // rejected here with an actionable message + op index instead of reaching the plugin and
 // throwing a cryptic error (or worse, silently building wrong geometry through the
 
-server.registerTool(
+registerTool(
   "rbx_batch",
   {
     title: "Batch build/edit (one undo)",
@@ -1118,7 +947,7 @@ const mapWatcher = new MapWatcher(MAPS_DIR, {
   onError: (error) => console.error("[buildkit] map watcher error:", error),
 });
 
-server.registerTool(
+registerTool(
   "rbx_map_status",
   {
     title: "Read declarative map status",
@@ -1128,7 +957,7 @@ server.registerTool(
   async () => textResult(mapStatusSummary()),
 );
 
-server.registerTool(
+registerTool(
   "rbx_map_apply",
   {
     title: "Apply one declarative map",
@@ -1144,7 +973,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_map_auto_apply",
   {
     title: "Toggle declarative map auto-apply",
@@ -1162,7 +991,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_ground_part",
   {
     title: "Set the map ground target",
@@ -1241,7 +1070,7 @@ const CONFORMANCE_TOLERANCE = z.union([
   }),
 ]);
 
-server.registerTool(
+registerTool(
   "rbx_conformance",
   {
     title: "Capture or check a scene conformance profile",
@@ -1291,7 +1120,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_library_save",
   {
     title: "Save staged prop ops to the AI library",
@@ -1314,7 +1143,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_library_list",
   {
     title: "List saved and recent library props",
@@ -1334,7 +1163,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_library_category_create",
   {
     title: "Create an AI library category",
@@ -1350,7 +1179,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "rbx_stage_build",
   {
       title: "Stage build ops in the live three.js preview (no Studio round-trip)",
@@ -1379,7 +1208,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_stage_clear",
   {
     title: "Clear the staged build (reset the live preview)",
@@ -1394,7 +1223,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_stage_commit",
   {
     title: "Commit the staged build into real Studio",
@@ -1412,7 +1241,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_stage_status",
   {
     title: "Read staged build status",
@@ -1426,7 +1255,7 @@ server.registerTool(
   async (a) => textResult(stageStatusSummary(stageRuntime(a.session), a.detail === true)),
 );
 
-server.registerTool(
+registerTool(
   "rbx_stage_render",
   {
     title: "Render a headless Stage session",
@@ -1454,21 +1283,7 @@ server.registerTool(
 );
 
 // --- describe: compact text scene readback (cheap "eyes") --------------------
-server.registerTool(
-  "rbx_describe",
-  {
-    title: "Describe (text scene readback)",
-    description:
-      "Compact JSON readback of a target: name/class/bbox per node, plus BasePart props (anchored/material/color) and children to `depth`. " +
-      "VERIFY a build/edit in text without spending a screenshot — only capture when geometry is genuinely ambiguous.",
-    inputSchema: {
-      target: z.string().optional().describe("Instance full path preferred; an unambiguous name is also accepted. Omit = whole workspace."),
-      depth: z.number().int().min(0).max(4).optional().describe("Child recursion depth 0-4. Default 1."),
-    },
-  },
-  async (a) => run("describe", { target: a.target, depth: a.depth ?? 1 })
 
-);
 
 // --- scene_dump: flat pos+rotation+shape+color dump for the three.js mirror viewer -
 const VIEWER_DIR = path.resolve(__dirname, "..", "viewer");
@@ -1536,12 +1351,12 @@ bridge.setMirrorHandler(async (place, dump) => {
   return true;
 });
 
-server.registerTool(
+registerTool(
   "rbx_scene_dump",
   {
     title: "Dump scene for the local three.js mirror viewer",
     description:
-      "Writes an exact flat part dump (position/rotation/shape/color/material, NOT just AABB like rbx_describe) to viewer/scene.json. " +
+      "Writes an exact flat part dump (position/rotation/shape/color/material, NOT just AABB) to viewer/scene.json. " +
       `Open http://localhost:${VIEWER_PORT}/stage.html?mirror=1 for a free-camera local render — cheaper than a screenshot, no Studio foreground needed. ` +
       "The mirror supports move/rotate/scale on dumped BaseParts; those transforms are sent to Studio as one undoable edit.",
     inputSchema: {
@@ -1573,7 +1388,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_live_sync_start",
   {
     title: "Start live Studio mirror sync",
@@ -1608,7 +1423,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_live_sync_stop",
   {
     title: "Stop live Studio mirror sync",
@@ -1716,7 +1531,7 @@ async function getMapDump(filter: any) {
   };
 }
 
-server.registerTool(
+registerTool(
   "rbx_map",
   {
     title: "Map the live place",
@@ -1793,7 +1608,7 @@ async function captureView(options: any) {
   }
 }
 
-server.registerTool(
+registerTool(
   "rbx_view",
   {
     title: "View the live place",
@@ -1976,7 +1791,7 @@ async function expandApply(items: any[]): Promise<ExpandedApplyOp[]> {
   return expanded;
 }
 
-server.registerTool(
+registerTool(
   "rbx_apply",
   {
     title: "Apply bulk edits",
@@ -2124,7 +1939,7 @@ function cleanPlacePayload(args: PlaceInput) {
   return payload;
 }
 
-server.registerTool(
+registerTool(
   "rbx_place",
   {
     title: "Place palette prefabs",
@@ -2149,7 +1964,7 @@ server.registerTool(
 );
 
 // --- selection bridge: read what the user clicked / show what you mean -------
-server.registerTool(
+registerTool(
   "rbx_selection",
   {
     title: "Get/set Studio selection",
@@ -2166,56 +1981,13 @@ server.registerTool(
 );
 
 // --- measure: distance/delta between two points ------------------------------
-server.registerTool(
-  "rbx_measure",
-  {
-    title: "Measure distance",
-    description:
-      "Distance + axis delta between two points. Each of a,b is an instance NAME (uses its bbox center) or explicit [x,y,z]. " +
-      "Kills coordinate guessing when aligning or spacing objects.",
-    inputSchema: {
-      a: z.union([z.string(), z.array(z.number()).length(3)]).describe("Instance name or [x,y,z]."),
-      b: z.union([z.string(), z.array(z.number()).length(3)]).describe("Instance name or [x,y,z]."),
-    },
-  },
-  async (a) => run("measure", { a: a.a, b: a.b })
 
-);
 
 // --- find: query the scene instead of guessing exact names -------------------
-server.registerTool(
-  "rbx_find",
-  {
-    title: "Find instances",
-    description:
-      "Query the scene for instances instead of needing the exact name. Filter by any combination of: name substring (or exact:true), className (matched with :IsA — 'BasePart'/'Model'/'Script'/…), CollectionService tag, attribute (key + optional value), and proximity (near a [x,y,z] point OR another instance, within radius). Returns up to `limit` {path,class,pos,size}. This is the cheap-perception way to LOCATE things before edit/inspect/describe — full paths are preferred and simple-name fallback is accepted only when unambiguous. Prefer it over blind execute_luau scans.",
-    inputSchema: {
-      name: z.string().optional().describe("Name substring (case-insensitive), or exact match with exact:true."),
-      exact: z.boolean().optional(),
-      class: z.string().optional().describe("ClassName matched with :IsA (e.g. 'BasePart','Model','ProximityPrompt')."),
-      tag: z.string().optional().describe("CollectionService tag."),
-      attr: z
-        .object({ key: z.string(), value: z.union([z.string(), z.number(), z.boolean()]).optional() })
-        .optional()
-        .describe("Attribute filter: key present, or key==value."),
-      near: z
-        .object({
-          point: z.array(z.number()).length(3).optional(),
-          target: z.string().optional(),
-          radius: z.number().optional(),
-        })
-        .optional()
-        .describe("Proximity: within radius of a [x,y,z] point or another instance's bbox center."),
-      root: z.string().optional().describe("Limit search under this instance (default whole workspace)."),
-      limit: cap(500).optional().describe("Max results (default 50, cap 500)."),
-    },
-  },
-  async (a) => run("find", a, 15_000)
 
-);
 
 // --- cast: raycast / volume overlap query ------------------------------------
-server.registerTool(
+registerTool(
   "rbx_cast",
   {
     title: "Raycast / volume query",
@@ -2238,7 +2010,7 @@ server.registerTool(
 );
 
 // --- script: READ Luau source (the read side sync never had) -----------------
-server.registerTool(
+registerTool(
   "rbx_script",
   {
     title: "Read script source",
@@ -2258,7 +2030,7 @@ server.registerTool(
 );
 
 // --- prop: get/set/list ANY property (rbx_attr is Attributes only) ------------
-server.registerTool(
+registerTool(
   "rbx_prop",
   {
     title: "Get/set instance property",
@@ -2277,7 +2049,7 @@ server.registerTool(
 );
 
 // --- group: wrap parts into a Model / ungroup / weld -------------------------
-server.registerTool(
+registerTool(
   "rbx_group",
   {
     title: "Group / ungroup / weld parts",
@@ -2298,7 +2070,7 @@ server.registerTool(
 );
 
 // --- console: read Studio LogService output ----------------------------------
-server.registerTool(
+registerTool(
   "rbx_console",
   {
     title: "Read Studio console",
@@ -2315,7 +2087,7 @@ server.registerTool(
 );
 
 // --- checkpoint: hard savepoint clone in ServerStorage -----------------------
-server.registerTool(
+registerTool(
   "rbx_checkpoint",
   {
     title: "Checkpoint / restore",
@@ -2333,24 +2105,10 @@ server.registerTool(
 );
 
 // --- isolate: hide everything except the target (bracket a clean capture) ----
-server.registerTool(
-  "rbx_isolate",
-  {
-    title: "Isolate target (hide the rest)",
-    description:
-      "mode='on' hides every part NOT under <target> so a capture shows only the object being built; mode='off' restores everything. " +
-      "Bracket the official screen_capture between on/off, or just pass isolate=true to rbx_capture for a one-call shot.",
-    inputSchema: {
-      mode: z.enum(["on", "off"]),
-      target: z.string().optional().describe("on: instance to keep visible (recursive)."),
-    },
-  },
-  async (a) => run("isolate", { mode: a.mode, target: a.target }, 60_000)
 
-);
 
 // --- restore: sweep-undo every outstanding hide/recolor ----------------------
-server.registerTool(
+registerTool(
   "rbx_restore",
   {
     title: "Restore all hidden / recolored parts",
@@ -2370,24 +2128,10 @@ server.registerTool(
 );
 
 // --- annotate: overlay bbox outline + dimension label ------------------------
-server.registerTool(
-  "rbx_annotate",
-  {
-    title: "Annotate target (bbox + dimensions)",
-    description:
-      "mode='on' overlays a bounding-box outline + a 'W×H×D studs' label on <target> so you can read scale/extent off the screenshot; mode='off' clears it. " +
-      "Bracket the official screen_capture between on/off, or pass annotate=true to rbx_capture.",
-    inputSchema: {
-      mode: z.enum(["on", "off"]),
-      target: z.string().optional().describe("on: instance to annotate (recursive)."),
-    },
-  },
-  async (a) => run("annotate", { mode: a.mode, target: a.target })
 
-);
 
 // --- place routing: pin commands to one Studio when several are open ---------
-server.registerTool(
+registerTool(
   "rbx_use_place",
   {
     title: "Target a Studio place",
@@ -2406,7 +2150,7 @@ server.registerTool(
 // PREFER the official mcp__Roblox_Studio__execute_luau(datamodel_type:"Server"|"Client")
 // for play-mode testing — zero setup, both contexts. These exist only for a
 // PERSISTENT/parallel in-game channel, and require LoadStringEnabled ticked.
-server.registerTool(
+registerTool(
   "rbx_runtime",
   {
     title: "Install/remove play-mode harness (last resort)",
@@ -2427,7 +2171,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+registerTool(
   "rbx_run",
   {
     title: "Run Luau in the live game (last resort)",
@@ -2461,7 +2205,7 @@ async function waitForListener(port: number, expectedPid: number | undefined, ti
   throw new Error(`BuildKit listener did not come up on port ${port} (last PID: ${last ?? "none"})`);
 }
 
-server.registerTool(
+registerTool(
   "rbx_dev_reload",
   {
     title: "Rebuild and reload the BuildKit server",
@@ -2491,7 +2235,7 @@ server.registerTool(
 );
 
 // --- status ------------------------------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_status",
   {
     title: "BuildKit status",
@@ -2526,7 +2270,7 @@ server.registerTool(
 );
 
 // --- navcheck: pathfinding / walkability QA -----------------------------------
-server.registerTool(
+registerTool(
   "rbx_navcheck",
   {
     title: "Navigation / walkability check",
@@ -2548,7 +2292,7 @@ server.registerTool(
 );
 
 // --- tag: CollectionService gameplay wiring ----------------------------------
-server.registerTool(
+registerTool(
   "rbx_tag",
   {
     title: "CollectionService tags",
@@ -2565,7 +2309,7 @@ server.registerTool(
 );
 
 // --- attr: instance attributes -----------------------------------------------
-server.registerTool(
+registerTool(
   "rbx_attr",
   {
     title: "Instance attributes",
@@ -2586,7 +2330,7 @@ server.registerTool(
 );
 
 // --- diff: compare two trees / checkpoints -----------------------------------
-server.registerTool(
+registerTool(
   "rbx_diff",
   {
     title: "Diff two trees / checkpoints",
@@ -2602,7 +2346,7 @@ server.registerTool(
 );
 
 // --- optimize: performance / streaming audit ---------------------------------
-server.registerTool(
+registerTool(
   "rbx_optimize",
   {
     title: "Performance / streaming audit",
@@ -2653,7 +2397,7 @@ async function expandLuauPaths(paths: string[]): Promise<string[]> {
   return out;
 }
 
-server.registerTool(
+registerTool(
   "rbx_sync",
   {
     title: "Sync disk script(s) into Studio",
@@ -2697,7 +2441,7 @@ server.registerTool(
 );
 
 // --- watch: a burst of screenshots over time = a "live feed" for the agent ----
-server.registerTool(
+registerTool(
   "rbx_watch",
   {
     title: "Watch motion over time (sampled burst)",
@@ -2809,7 +2553,7 @@ function runPipeline(args: string[], env: Record<string, string>): Promise<any> 
 }
 
 if (HAS_PIPELINE)
-  server.registerTool(
+  registerTool(
   "rbx_gen_mesh",
   {
     title: "Generate a 3D mesh and import it to Roblox",
@@ -2875,6 +2619,67 @@ if (HAS_PIPELINE)
     }
   }
   );
+
+const ALWAYS_ENABLED_TOOLS = new Set([
+  "rbx_map",
+  "rbx_view",
+  "rbx_apply",
+  "rbx_dev_reload",
+  "rbx_status",
+  "rbx_qa",
+  "rbx_checkpoint",
+  "rbx_enable_tools",
+  "rbx_list_tools",
+]);
+
+registerTool(
+  "rbx_enable_tools",
+  {
+    title: "Enable BuildKit tools",
+    description: "Enable one or more lazy-loaded BuildKit tools by exact name. Use rbx_list_tools first when you need to search the catalog.",
+    inputSchema: {
+      names: z.array(z.string().min(1)).min(1).max(50).describe("Exact tool names to enable."),
+    },
+  },
+  async (a) => {
+    const enabled: string[] = [];
+    const unknown: string[] = [];
+    for (const name of new Set(a.names)) {
+      const entry = toolCatalog.get(name);
+      if (!entry) {
+        unknown.push(name);
+        continue;
+      }
+      entry.handle.enable();
+      enabled.push(name);
+    }
+    return textResult({ enabled, unknown });
+  }
+);
+
+registerTool(
+  "rbx_list_tools",
+  {
+    title: "Search BuildKit tools",
+    description: "Search all BuildKit tools, including lazy-loaded tools that are not currently in tools/list. Search by name, title, or description.",
+    inputSchema: {
+      query: z.string().optional().describe("Case-insensitive substring to match against tool name, title, or description. Omit to list the full catalog."),
+    },
+  },
+  async (a) => {
+    const query = a.query?.trim().toLowerCase() ?? "";
+    const tools = [...toolCatalog.entries()]
+      .filter(([name, entry]) => !query || `${name} ${entry.title ?? ""} ${entry.description ?? ""}`.toLowerCase().includes(query))
+      .map(([name, entry]) => ({ name, title: entry.title, description: entry.description, enabled: entry.handle.enabled }));
+    return textResult({ tools });
+  }
+);
+
+// The SDK filters disabled handles out of tools/list and emits tools/list_changed. Do this
+// before connecting the transport so the first client snapshot is already lazy-loaded.
+for (const [name, entry] of toolCatalog) {
+  if (!ALWAYS_ENABLED_TOOLS.has(name)) entry.handle.disable();
+}
 
 // Static viewer files and the shared SSE stream live in this process so stage ops and
 // mirror sync reach open browser tabs directly.

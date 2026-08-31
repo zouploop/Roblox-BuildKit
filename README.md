@@ -153,6 +153,11 @@ on the next changed snapshot. Use **Options → Force sync** to request an immed
 
 The MCP manifest is the source of truth for exact arguments. Most work starts with:
 
+Only the core map/view/edit/reload tools, status, QA/checkpoint, and the discovery helpers are
+listed at startup. Search the full catalog with `rbx_list_tools({query:"terrain"})`, then call
+`rbx_enable_tools({names:["rbx_terrain"]})`; the server sends `tools/list_changed` so connected
+clients can refresh their available tools.
+
 | Tool | Purpose |
 |---|---|
 | `rbx_map` | Compact, filtered read of the live place. |

@@ -15,11 +15,11 @@ Skills for any AI agent, packaged to pair with the
 Each skill carries a **"Using the BuildKit MCP"** section pointing at the relevant
 `rbx_*` tools (see the root [`README.md`](../README.md) for the full server/plugin design).
 
-For parallel prop work, assign each subagent a unique Stage session (maximum six):
-`rbx_stage_build` → `rbx_stage_status`/`rbx_stage_render` → `rbx_stage_clear`, then
-`rbx_library_save`; use `rbx_library_list` and `rbx_library_category_create` to organize
-results. These subagents must never call Studio/bridge tools or `rbx_stage_commit`; the user
-explicitly ports selected winners later.
+For parallel map or prop work, use `roblox-build-subagents`. It defines the isolated
+session, headless rendering, library handoff, and coordinator-only integration boundary.
+
+The server lazy-loads specialist tools. Use `rbx_list_tools({query:"..."})` to search the full
+catalog, then `rbx_enable_tools({names:["rbx_tool_name"]})` before calling a specialist tool.
 
 ## Install
 
