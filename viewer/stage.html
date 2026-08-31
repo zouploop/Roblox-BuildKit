@@ -628,7 +628,6 @@ const dockSlots = [...document.querySelectorAll(".dock-slot")];
 const dockSlotNames = new Set(dockSlots.map((slot) => slot.dataset.slot));
 const dockContainer = document.getElementById("dock-slots");
 const docked = new Map();
-const layoutSnap = 12;
 const layoutMin = { width: 170, height: 80 };
 
 function panelRect(panel) {

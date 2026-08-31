@@ -5,8 +5,8 @@
 // When two Studios run the plugin, set an active place filter
 // (rbx_use_place) so commands only dispatch to the Studio whose name matches.
 //
-// SHARED BRIDGE (multi-agent): two MCP clients (e.g. Claude + Codex) each spawn
-// their own copy of this server, but only ONE can bind port 44760. The first to
+// SHARED BRIDGE (multi-agent): two MCP clients can each spawn their own copy of
+// this server, but only ONE can bind port 44760. The first to
 // bind is the "owner" and runs the real bridge; later copies fall back to "client"
 // mode and forward their commands to the owner via POST /submit. The plugin only
 // ever polls the single owner, so both agents drive the same Studio. If the owner

@@ -36,9 +36,6 @@
 !/skills/
 !/skills/**
 
-!/images/
-!/images/**
-
 !/specs/
 /specs/*
 !/specs/.gitkeep

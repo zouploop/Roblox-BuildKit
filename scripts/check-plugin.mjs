@@ -8,24 +8,6 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcDir = path.join(root, "plugin", "src");
 const artifact = path.join(root, "plugin", "BuildKitPlugin.rbxmx");
-const FILES = [
-	"00-header.luau",
-	"10-geometry.luau",
-	"20-detail.luau",
-	"30-parametric.luau",
-	"40-quality.luau",
-	"50-fx-parts.luau",
-	"60-prop-regen.luau",
-	"70-prop-presets.luau",
-	"80-builders.luau",
-	"90-gui.luau",
-	"100-handlers.luau",
-	"110-poll.luau",
-	"120-toolbar.luau",
-	"130-settings.luau",
-	"140-mesh-cutter.luau",
-];
-
 const MODULES = [
 	["ctx.luau", "Ctx"],
 	["00-header.luau", "Core"],

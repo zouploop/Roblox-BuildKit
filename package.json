@@ -2,7 +2,7 @@
   "name": "roblox-buildkit-mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP server that gives Claude a steerable camera, cutaway/floor-plan capture, and parametric build primitives for Roblox Studio (paired with BuildKitPlugin).",
+  "description": "AI-assisted Roblox scene building toolkit: MCP server, Studio plugin, browser Stage editor, live Mirror sync, parametric placement, and QA.",
   "license": "MIT",
   "type": "module",
   "bin": {
