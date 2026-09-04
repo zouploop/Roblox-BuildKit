@@ -130,6 +130,7 @@ local function makePart(parent, ps, ox, oy, oz)
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth
 	if ps.name then p.Name = ps.name end
+	if type(ps.id) == "string" then p:SetAttribute("BuildKitPartId", ps.id) end
 	if ps.op then p:SetAttribute("__op", tostring(ps.op)) end -- per-part operation during opt-in CSG
 	if ps.negate then p:SetAttribute("__negate", true) end -- legacy alias for subtract
 	p.Parent = parent

@@ -70,8 +70,11 @@ Agent --stdio--> MCP server --HTTP long-poll--> BuildKitPlugin --edits--> Studio
 
 The bridge listens on `127.0.0.1:44760`; the browser viewer listens on
 `127.0.0.1:8642`. Override them with `BUILDKIT_PORT` and `BUILDKIT_VIEWER_PORT`.
-`start.bat` is the self-locating standalone launcher; an MCP-compatible agent normally starts
-the server process itself.
+`start.bat` is the self-locating standalone launcher. It force-stops any process listening
+on the configured bridge port (44760 by default), verifies the port is free, then starts
+BuildKit. Save Stage work first: a terminated server loses its in-memory state. If the
+port cannot be released, startup stops with an error. An MCP-compatible agent normally
+starts the server process itself.
 
 ## Browser workflow
 
@@ -158,6 +161,32 @@ Library panel and can be enabled or disabled there.
 
 #### Panels and options
 
+Open **Options → Panels → Issues** for Stage seam checks. Stage changes automatically
+rescan facing box surfaces, cylinder endcaps, and optional authored joints. Select an issue to
+highlight both parts and frame its measured endpoints. **Preview repair** shows a proposed
+translation; **Apply repair** changes Stage and can be undone. Nothing is moved just by
+scanning. **Mark intentional** labels the finding and disables its repair in this browser
+until its geometry changes.
+Counts distinguish all findings from displayed samples; coverage lists unchecked surfaces.
+No findings is not a guarantee that arbitrary meshes, CSG, or openings are correct.
+
+Agents can load `rbx_stage_qa`: `scan` returns bounded findings and coverage, `preview` and
+`apply` require the reported `issueId` and `expectedRevision`, and `compare` reads an exact
+Studio `target` to check primitive positions, rotation matrices, sizes, and shapes against
+Stage. Comparison reports partial coverage for old plugins, truncated reads, and unsupported
+surfaces; it does not certify materials or rendered CSG fidelity. Automatic Studio build QA
+is report-only; Studio-side repairs require an explicit `rbx_qa` call with `fix:true`.
+
+Optional prop `connections` declare `touch`, `supportedBy`, `continuousSurface`, or
+`clearance` rules. Each rule has an `id`, `a`/`b` endpoints (`part`: stable ID or unique
+local name; `point`: part-local XYZ), and optional `tolerance` or clearance `min`/`max`.
+These measure authored endpoint distance, not general support physics or walkability.
+Stage stores canonical rules on their owning parts with stable IDs and reference sizes,
+preserving them through grouping, library round-trips, rotation, and resizing. Missing or
+ambiguous endpoints are errors rather than guessed matches. Use `buildkit.beamBetween`,
+`buildkit.railingPath`, and `buildkit.bridgeBetween` in generators for endpoint-driven
+geometry; see `generators/README.md` for their arguments.
+
 Drag any panel by its title. Drop it on the highlighted left, right, top, or bottom docking
 area; dropping another panel into the same area creates tabs. Drag a highlighted resize
 edge to resize the panel, or leave it floating and resize it from its edges. Close panels
@@ -215,7 +244,18 @@ refreshes the browser Mirror.
 
 ## Capture behavior
 
-The preferred clean capture path is:
+Prefer `rbx_stage_render` while building in Stage. It frames geometry directly in the
+browser without moving Studio's camera. Start with one useful angle; frame a changed prop
+with `opIndex`, or request a smaller overview with `width:480, height:320`. Defaults are
+800×600. Increase resolution when checking fine seams; do not rely on thumbnails for QA.
+
+Agent Stage calls on the same viewer port share the viewer owner's state. Adds, clears,
+repairs, and generator-file updates rebuild the Stage view automatically, preserving the
+camera and panel layout. Pending user edits are allowed to finish first; failed,
+unacknowledged edits are retained instead of overwritten. Mirror keeps its own autosync.
+Different viewer ports intentionally remain independent.
+
+For final Roblox materials, lighting, CSG, and runtime verification, the clean Studio path is:
 
 1. call `rbx_frame` to calculate camera coordinates;
 2. pass those coordinates to the official Roblox Studio MCP `screen_capture` tool.
@@ -226,6 +266,18 @@ compose temporary scene state or timed frames inside one call. Studio must be vi
 those tools. The fallback uses the plugin's
 `CurrentCamera.ViewportSize` to crop to the 3D viewport when possible and returns the full
 Studio client area only when the crop cannot be resolved.
+
+`rbx_library_save`, `rbx_library_list`, and `rbx_stage_commit` now return compact metadata
+or QA summaries by default. Use `detail:true` for full output, and `file:"Preset.json"`
+on library list to fetch only one preset's geometry.
+
+To keep agent context small: use `rbx_stage_status` summaries before requesting images;
+use limited `rbx_stage_qa` results for measurements; inspect only changed regions during
+iteration; save reusable props in the library instead of repeating full part lists; and
+return artifact paths plus compact findings from subagents. Batch independent work, but
+remember that multiple images still cost image tokens. Savings depend on the model's
+image processing and harness—PNG compression and fewer tool calls do not by themselves
+guarantee lower token usage. Keep a final whole-map and Studio verification pass.
 
 ## Settings and local files
 

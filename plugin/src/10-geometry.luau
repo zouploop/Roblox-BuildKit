@@ -524,7 +524,7 @@ local function treeNode(inst, root, rootPath, entryByPart, totalByNode, dumpedBy
 	return node
 end
 
-local function sceneDump(inst, cap, includePart)
+local function sceneDump(inst, cap, includePart, precise)
 	local parts = partsOf(inst)
 	if includePart then
 		local scoped = {}
@@ -545,6 +545,7 @@ local function sceneDump(inst, cap, includePart)
 		local path = fullPathOf(p)
 		local parentPath = fullPathOf(p.Parent)
 		local entry = {
+			buildkitId = p:GetAttribute("BuildKitPartId"),
 			name = p.Name,
 			class = p.ClassName,
 			shape = shapeOf(p),
@@ -564,6 +565,10 @@ local function sceneDump(inst, cap, includePart)
 			parentPath = parentPath,
 			relativeParentPath = relativePathOf(parentPath, rootPath),
 		}
+		if precise then
+			entry.cframe = { p.CFrame:GetComponents() }
+			entry.exactSize = { p.Size.X, p.Size.Y, p.Size.Z }
+		end
 		if p.Transparency > 0 then
 			entry.transparency = r1(p.Transparency)
 		end

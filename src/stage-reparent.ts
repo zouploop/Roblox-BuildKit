@@ -1,4 +1,5 @@
 import { validateStageOps } from "./stage-share.js";
+import { normalizeStageConnections } from "./stage-connections.js";
 import type { StageOp } from "./stage-state.js";
 
 export type StageReparentRequest = {
@@ -66,6 +67,19 @@ export function parseStageReparentRequest(value: unknown): StageReparentRequest 
 }
 
 export function applyStageReparent(entries: ReparentEntry[], request: StageReparentRequest): { entries: ReparentEntry[]; promotedOwners: Set<string> } {
+  const normalized = normalizeStageConnections(entries.map(entry => entry.op));
+  entries = entries.map((entry, index) => ({ ...entry, op: normalized[index] }));
+  // Unresolved library collisions cannot safely cross an op boundary.
+  if (normalized.some(op => Array.isArray(op.args.connections) && op.args.connections.length > 0)) {
+    const ids = new Set<string>();
+    for (const op of normalized) {
+      if (op.action !== "build" || op.args.kind !== "prop" || !Array.isArray(op.args.parts)) continue;
+      for (const part of op.args.parts) if (isRecord(part) && typeof part.id === "string") {
+        if (ids.has(part.id)) throw new Error(`stage reparent unresolved connection ID collision: ${part.id}`);
+        ids.add(part.id);
+      }
+    }
+  }
   const sources = request.sources ?? (request.source ? [request.source] : []);
   if (sources.length === 0) throw new Error("stage reparent requires at least one source");
   if (request.action === "group" && request.targetIndex === undefined) {
@@ -103,7 +117,7 @@ export function applyStageReparent(entries: ReparentEntry[], request: StageRepar
     nextSourceArgs.parts.splice(source.ref.partIndex, 1);
     const nextTargetArgs = prop(next[request.targetIndex], "target");
     nextTargetArgs.parts.push({ ...source.part, pos: source.world.map((value, index) => value - targetCenter[index]) });
-    if (nextSourceArgs.parts.length === 0) next.splice(source.ref.index, 1);
+    if (nextSourceArgs.parts.length === 0 && nextSourceArgs.connections === undefined) next.splice(source.ref.index, 1);
     const validated = validateStageOps(next.map((entry) => entry.op), "stage reparent");
     return { entries: next.map((entry, index) => ({ ...entry, op: validated[index] })), promotedOwners };
   }
@@ -124,7 +138,7 @@ export function applyStageReparent(entries: ReparentEntry[], request: StageRepar
       args.parts = args.parts.filter((_, partIndex) => !partIndexes.has(partIndex));
       return entry;
     })
-    .filter((entry, index) => !selectedParts.has(index) || !((entry.op.action === "build") && entry.op.args.kind === "prop" && Array.isArray(entry.op.args.parts) && entry.op.args.parts.length === 0));
+    .filter((entry, index) => !selectedParts.has(index) || !((entry.op.action === "build") && entry.op.args.kind === "prop" && Array.isArray(entry.op.args.parts) && entry.op.args.parts.length === 0 && entry.op.args.connections === undefined));
 
   if (request.action === "group") {
     next = removeSelected();

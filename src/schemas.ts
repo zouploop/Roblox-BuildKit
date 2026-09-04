@@ -45,6 +45,25 @@ export function targetReferences(values: readonly TargetIdentity[]): string[] {
 }
 
 // --- build: parametric primitives --------------------------------------------
+const CONNECTION_ID = z.string().refine(value => value.trim().length > 0, "Expected a non-empty identifier");
+const CONNECTION_ENDPOINT = z.object({
+  part: CONNECTION_ID,
+  point: z.array(z.number().finite()).length(3),
+  size: z.array(z.number().finite().positive()).length(3).optional(),
+}).passthrough();
+
+export const STAGE_CONNECTION = z.object({
+  id: CONNECTION_ID,
+  type: z.enum(["touch", "supportedBy", "continuousSurface", "clearance"]),
+  a: CONNECTION_ENDPOINT,
+  b: CONNECTION_ENDPOINT,
+  tolerance: z.number().finite().nonnegative().optional(),
+  min: z.number().finite().nonnegative().optional(),
+  max: z.number().finite().nonnegative().optional(),
+}).passthrough().refine(value => value.min === undefined || value.max === undefined || value.min <= value.max, {
+  message: "connection min must not exceed max", path: ["max"],
+});
+
 // The build spec schema, shared by rbx_build (wrapped under `spec`) and rbx_batch
 // (build op args are the spec fields DIRECTLY). One source of truth so the batch
 // path can't drift from the single-build path. Exported for the test suite.
@@ -59,6 +78,8 @@ export const BUILD_SPEC = z
       .array(
         z
           .object({
+            id: CONNECTION_ID.optional(),
+            connections: z.array(STAGE_CONNECTION).optional(),
             shape: z.enum(["box", "cylinder", "ball", "wedge"]).optional().describe("Default box. Cylinder length is along its LOCAL X — use rot to orient."),
             pos: z.array(z.number()).length(3).optional().describe("[x,y,z] offset from center. Default [0,0,0]."),
             size: z.array(z.number()).length(3),
@@ -114,6 +135,7 @@ export const BUILD_SPEC = z
       ])
       .optional()
       .describe("prop preset: a ready-made multi-part prop (noir set-dressing). With this you can omit `parts`. `color` overrides the hero colour; `scale` resizes."),
+    connections: z.array(STAGE_CONNECTION).optional(),
     scale: z.number().optional().describe("prop: uniform scale multiplier (default 1). Editable later via the Scale attribute (rebuilds in place)."),
     seats: z.number().optional().describe("sofa: number of seat cushions (default 3)."),
     drawers: z.number().optional().describe("nightstand: drawer count (default 2)."),

@@ -73,7 +73,7 @@ if okWidget and widget then
 	toggleBtn("officialGen", "Official AI gen (mesh/proc)", true)
 	toggleBtn("meshRef", "Use meshes as reference", true)
 	toggleBtn("localImport", "Local-gen import (ComfyUI+Hunyuan)", false)
-	toggleBtn("autoQA", "Auto-QA every build", true)
+	toggleBtn("autoQA", "Auto-QA every build (report only)", true)
 	lbl("VIEWER SYNC", Color3.fromRGB(120, 200, 255), 22)
 	field("liveSyncIntervalMs", "Viewer poll interval (ms)", 1500)
 	toggleBtn("liveSync", "Auto-sync viewer", true)

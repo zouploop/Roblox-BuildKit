@@ -750,7 +750,7 @@ local function treeNode(inst, root, rootPath, entryByPart, totalByNode, dumpedBy
 	return node
 end
 
-local function sceneDump(inst, cap, includePart)
+local function sceneDump(inst, cap, includePart, precise)
 	local parts = partsOf(inst)
 	if includePart then
 		local scoped = {}
@@ -771,6 +771,7 @@ local function sceneDump(inst, cap, includePart)
 		local path = fullPathOf(p)
 		local parentPath = fullPathOf(p.Parent)
 		local entry = {
+			buildkitId = p:GetAttribute("BuildKitPartId"),
 			name = p.Name,
 			class = p.ClassName,
 			shape = shapeOf(p),
@@ -790,6 +791,10 @@ local function sceneDump(inst, cap, includePart)
 			parentPath = parentPath,
 			relativeParentPath = relativePathOf(parentPath, rootPath),
 		}
+		if precise then
+			entry.cframe = { p.CFrame:GetComponents() }
+			entry.exactSize = { p.Size.X, p.Size.Y, p.Size.Z }
+		end
 		if p.Transparency > 0 then
 			entry.transparency = r1(p.Transparency)
 		end
@@ -1314,6 +1319,7 @@ local function makePart(parent, ps, ox, oy, oz)
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth
 	if ps.name then p.Name = ps.name end
+	if type(ps.id) == "string" then p:SetAttribute("BuildKitPartId", ps.id) end
 	if ps.op then p:SetAttribute("__op", tostring(ps.op)) end -- per-part operation during opt-in CSG
 	if ps.negate then p:SetAttribute("__negate", true) end -- legacy alias for subtract
 	p.Parent = parent
@@ -1410,6 +1416,8 @@ local function build()
 		p.Transparency = ps.transparency or 0
 		if ps.canCollide ~= nil then p.CanCollide = ps.canCollide end
 		p.TopSurface = Enum.SurfaceType.Smooth; p.BottomSurface = Enum.SurfaceType.Smooth
+		if ps.name then p.Name = ps.name end
+		if type(ps.id) == "string" then p:SetAttribute("BuildKitPartId", ps.id) end
 		if ps.op then p:SetAttribute("__op", tostring(ps.op)) end
 		if ps.negate then p:SetAttribute("__negate", true) end
 		p.Parent = model
@@ -4101,11 +4109,11 @@ local function worldAABB(p)
 	return p.Position, Vector3.new(ex, ey, ez) -- center, HALF-extents (world-aligned)
 end
 
--- Real geometry overlap set (rotation-correct): set[a][b]=true iff a and b actually intersect.
--- Gates the AABB magnitude math so oblique parts can't raise phantom overlap/z-fight flags, and
--- gives connectivity that rewards real seating instead of bounding-box kisses.
+-- Studio collision-query overlap set; collision fidelity/query filters apply.
+-- A hit confirms collision-volume overlap, not exact rendered mesh intersection.
 local function realOverlaps(parts)
 	local set, idx = {}, {}
+	local failures = 0
 	for i, p in ipairs(parts) do idx[p] = i; set[p] = {} end
 	local op = OverlapParams.new()
 	op.FilterType = Enum.RaycastFilterType.Include
@@ -4118,24 +4126,52 @@ local function realOverlaps(parts)
 			for _, b in ipairs(hits) do
 				if b ~= a and idx[b] then set[a][b] = true; set[b][a] = true end
 			end
+		else
+			failures += 1
 		end
 	end
-	return set
+	return set, failures
 end
 
--- Translation that seats a FLOATING part F into its nearest neighbour N (~0.12 stud overlap),
--- moving only along axes that are actually gapped so a part already seated on 2 axes just slides
--- in on the third. Used by the fix pass to auto-close true gaps (single-part orphans only).
-local function seatMove(F, N)
-	local fc, fh = worldAABB(F)
-	local nc, nh = worldAABB(N)
-	local function axm(fcv, fhv, ncv, nhv)
-		local gap = math.abs(fcv - ncv) - (fhv + nhv)
-		if gap <= -0.1 then return 0 end -- already overlapping enough on this axis
-		local dir = (ncv >= fcv) and 1 or -1
-		return dir * (gap + 0.12)
+-- Conservative local face test: only rectangular Parts with matching oriented axes.
+-- No mesh/cylinder/wedge surface claims; a world AABB is only a broad-phase bound.
+local function qaFaceGap(a, b, minGap, maxGap, minFace)
+	if not (a:IsA("Part") and b:IsA("Part") and a.Shape == Enum.PartType.Block and b.Shape == Enum.PartType.Block) then return nil end
+	if (a.Position - b.Position).Magnitude > (a.Size.Magnitude + b.Size.Magnitude) / 2 + maxGap then return nil end
+	local axes = { a.CFrame.RightVector, a.CFrame.UpVector, a.CFrame.LookVector }
+	local other = { b.CFrame.RightVector, b.CFrame.UpVector, b.CFrame.LookVector }
+	local ah = { a.Size.X / 2, a.Size.Y / 2, a.Size.Z / 2 }
+	local bh = { b.Size.X / 2, b.Size.Y / 2, b.Size.Z / 2 }
+	local delta = b.Position - a.Position
+	local distances, radii, overlaps = {}, {}, {}
+	for i, axis in ipairs(axes) do
+		local aligned = false
+		local radius = 0
+		for j, direction in ipairs(other) do
+			local dot = math.abs(axis:Dot(direction))
+			if dot > 1 - 1e-7 then aligned = true end
+			radius += dot * bh[j]
+		end
+		if not aligned then return nil end
+		local d = delta:Dot(axis)
+		distances[i], radii[i] = d, radius
+		overlaps[i] = math.min(ah[i], d + radius) - math.max(-ah[i], d - radius)
 	end
-	return Vector3.new(axm(fc.X, fh.X, nc.X, nh.X), axm(fc.Y, fh.Y, nc.Y, nh.Y), axm(fc.Z, fh.Z, nc.Z, nh.Z))
+	for i, axis in ipairs(axes) do
+		local gap = math.abs(distances[i]) - ah[i] - radii[i]
+		local j, k = i % 3 + 1, (i + 1) % 3 + 1
+		if gap > minGap and gap <= maxGap and overlaps[j] > minFace and overlaps[k] > minFace then
+			local normal = axis * (distances[i] >= 0 and 1 or -1)
+			local point = a.Position + normal * ah[i]
+			for _, t in ipairs({ j, k }) do
+				local lo = math.max(-ah[t], distances[t] - radii[t])
+				local hi = math.min(ah[t], distances[t] + radii[t])
+				point += axes[t] * ((lo + hi) / 2)
+			end
+			return { gap = gap, normal = normal, pointA = point, pointB = point + normal * gap }
+		end
+	end
+	return nil
 end
 
 -- Geometric lint you can't eyeball: unanchored parts, double-placed duplicates,
@@ -4146,7 +4182,7 @@ end
 -- front off its tray, a handle floating off its panel. Scoped per-leaf-model so a drawer's
 -- sliding clearance to the CARCASS (a different model) is never mistaken for a defect.
 -- ov = realOverlaps set over the whole instance; seats (optional) collects {part,move} to auto-seat.
-local function assemblyGaps(root, out, ov, seats, allowed)
+local function assemblyGaps(root, out, ov, seats, allowed, coverage, report)
 	local function isLeaf(m)
 		if not m:IsA("Model") then return false end
 		local hasPart = false
@@ -4167,7 +4203,12 @@ local function assemblyGaps(root, out, ov, seats, allowed)
 			if d:IsA("BasePart") and (not allowed or allowed[d]) then table.insert(ps, d) end
 		end
 		local k = #ps
-		if k >= 2 and k <= 400 then
+		if k >= 2 and (k > 400 or coverage.pairScan == "skipped") then
+			coverage.leavesSkipped += 1
+			if #coverage.skippedLeafSample < 25 then table.insert(coverage.skippedLeafSample, m:GetFullName()) end
+		end
+		if k >= 2 and k <= 400 and coverage.pairScan ~= "skipped" then
+			coverage.leavesChecked += 1
 			local par = {}
 			for i = 1, k do par[i] = i end
 			local function find(x)
@@ -4182,20 +4223,10 @@ local function assemblyGaps(root, out, ov, seats, allowed)
 				local c, h = worldAABB(ps[i])
 				AB[i] = { c = c, h = h }
 			end
-			-- adjacency = REAL geometry overlap (rotation-correct) OR a flush/near-touch within a small
-			-- rotation-aware tolerance, so clean butt joints and tight multi-segment chains (frond
-			-- arcs, candelabra arms) aren't mistaken for floating pieces. EPS is kept small (0.1) so an
-			-- oblique part's empty AABB corner still reads as a real gap.
-			local EPS = 0.1
-			local function near(ia, ib)
-				local A, B = AB[ia], AB[ib]
-				return math.abs(A.c.X - B.c.X) <= A.h.X + B.h.X + EPS
-					and math.abs(A.c.Y - B.c.Y) <= A.h.Y + B.h.Y + EPS
-					and math.abs(A.c.Z - B.c.Z) <= A.h.Z + B.h.Z + EPS
-			end
+			-- Collision-query overlap or a supported local block-face near joint.
 			for i = 1, k do
 				for j = i + 1, k do
-					if (ov[ps[i]] and ov[ps[i]][ps[j]]) or near(i, j) then
+					if (ov[ps[i]] and ov[ps[i]][ps[j]]) or qaFaceGap(ps[i], ps[j], -0.1, 0.1, 0.001) then
 						par[find(i)] = find(j)
 					end
 				end
@@ -4212,7 +4243,7 @@ local function assemblyGaps(root, out, ov, seats, allowed)
 				if not mainSize or #members > mainSize then mainSize = #members; mainRoot = r end
 			end
 			if ncomp > 1 then
-				local best
+				local best, bestParts
 				for i = 1, k do
 					for j = i + 1, k do
 						if find(i) ~= find(j) then
@@ -4221,13 +4252,11 @@ local function assemblyGaps(root, out, ov, seats, allowed)
 							local dy = math.max(0, math.abs(A.c.Y - B.c.Y) - (A.h.Y + B.h.Y))
 							local dz = math.max(0, math.abs(A.c.Z - B.c.Z) - (A.h.Z + B.h.Z))
 							local d = math.sqrt(dx * dx + dy * dy + dz * dz)
-							if not best or d < best then best = d end
+							if not best or d < best then best = d; bestParts = { ps[i], ps[j] } end
 						end
 					end
 				end
-				if #out < 25 then
-					table.insert(out, string.format("%s splits into %d unjoined groups (nearest gap %.2f)", m:GetFullName(), ncomp, best or 0))
-				end
+				report("nearGaps", out, string.format("%s splits into %d groups without confirmed contact (AABB gap lower bound %.2f; verify surfaces)", m:GetFullName(), ncomp, best or 0), bestParts, "low")
 				-- auto-seat (fix pass): a lone floating piece (single-part orphan component) is nudged
 				-- into the nearest part of the main blob. Multi-part orphans are only reported — moving a
 				-- sub-cluster could distort it, and seating a part with >1 joint could tear the other.
@@ -4250,7 +4279,8 @@ local function assemblyGaps(root, out, ov, seats, allowed)
 									if not nd or d < nd then nd = d; nearest = ps[mi] end
 								end
 								-- near-miss only: a large move means the part is meant to sit apart, not seat
-								local mv = nearest and seatMove(F, nearest)
+								local face = nearest and qaFaceGap(F, nearest, 0.1, 0.48, 0.001)
+								local mv = face and face.normal * (face.gap + 0.12)
 								if mv and mv.Magnitude <= 0.6 then table.insert(seats, { part = F, move = mv }) end
 							end
 						end
@@ -4267,7 +4297,8 @@ end
 local p4Region, p4InRegion
 
 local qaScan = function(inst, options)
-	local args = type(options) == "table" and options or { fix = options == true }
+	local args = type(options) == "table" and options or {}
+	local fix = args.fix == true
 	local allParts = partsOf(inst)
 	local region = args.region ~= nil and p4Region(args.region, "qa region") or nil
 	local parts, allowed = {}, nil
@@ -4281,20 +4312,35 @@ local qaScan = function(inst, options)
 	end
 	local n = #parts
 	local unanchored = {}
-	for _, p in ipairs(parts) do
-		if not p.Anchored then
-			if #unanchored < 25 then
-				table.insert(unanchored, p:GetFullName())
-			end
-		end
-	end
-	local unanchoredCount = 0
-	for _, p in ipairs(parts) do
-		if not p.Anchored then unanchoredCount += 1 end
-	end
 	local CAP = 1200
 	local duplicates, deepOverlaps, nearGaps, zFights, fitGaps = {}, {}, {}, {}, {}
-	local fitCandidates, connectedAssemblies = {}, {}
+	local counts = { unanchored = 0, duplicates = 0, deepOverlaps = 0, nearGaps = 0, zFights = 0, fitGaps = 0 }
+	local issues = {}
+	local coverage = {
+		status = "complete", partsSelected = n, partsTotal = #allParts, sampleCap = 25,
+		pairScan = n <= CAP and "complete" or "skipped", pairCap = CAP,
+		fitScan = args.fit and (n <= CAP and "complete" or "skipped") or "disabled",
+		leavesChecked = 0, leavesSkipped = 0, leafCap = 400, skippedLeafSample = {},
+		overlapQueryFailures = 0, assemblyScan = n <= CAP and "complete" or "skipped",
+		geometry = "collision-query overlaps; near/fit faces only for aligned oriented blocks; not exact mesh surfaces",
+	}
+	local function report(kind, sample, message, objects, confidence, face)
+		counts[kind] += 1
+		if #sample >= 25 then return end
+		table.insert(sample, message)
+		local names = {}
+		for _, object in ipairs(objects) do table.insert(names, object:GetFullName()) end
+		local issue = { kind = kind, message = message, parts = names, confidence = confidence }
+		if face then
+			issue.points = { { face.pointA.X, face.pointA.Y, face.pointA.Z }, { face.pointB.X, face.pointB.Y, face.pointB.Z } }
+			issue.gap = face.gap
+		end
+		table.insert(issues, issue)
+	end
+	for _, p in ipairs(parts) do
+		if not p.Anchored then report("unanchored", unanchored, p:GetFullName(), { p }, "high") end
+	end
+	local unanchoredCount = counts.unanchored
 	local zfFix = {} -- {part, axis, dir} pairs to nudge apart when args.fix
 	local seats = {} -- {part, move} floating pieces to auto-seat when args.fix
 	local ov = {}
@@ -4316,13 +4362,8 @@ local qaScan = function(inst, options)
 		end
 		return nil
 	end
-	local function connectAssemblies(a, b)
-		connectedAssemblies[a] = connectedAssemblies[a] or {}
-		connectedAssemblies[b] = connectedAssemblies[b] or {}
-		connectedAssemblies[a][b], connectedAssemblies[b][a] = true, true
-	end
 	if n <= CAP then
-		ov = realOverlaps(parts) -- rotation-correct real-overlap set; gates the AABB magnitude math
+		ov, coverage.overlapQueryFailures = realOverlaps(parts)
 		local AB = {}
 		for i = 1, n do
 			local c, h = worldAABB(parts[i])
@@ -4339,28 +4380,14 @@ local qaScan = function(inst, options)
 						local sa, sb = slidingModel(a), slidingModel(b)
 						local intended = (sa and not b:IsDescendantOf(sa)) or (sb and not a:IsDescendantOf(sb))
 						if not intended then
-							local gx = math.min(A.c.X + A.h.X, B.c.X + B.h.X) - math.max(A.c.X - A.h.X, B.c.X - B.h.X)
-							local gy = math.min(A.c.Y + A.h.Y, B.c.Y + B.h.Y) - math.max(A.c.Y - A.h.Y, B.c.Y - B.h.Y)
-							local gz = math.min(A.c.Z + A.h.Z, B.c.Z + B.h.Z) - math.max(A.c.Z - A.h.Z, B.c.Z - B.h.Z)
-							local GMIN, GMAX, FACE = 0.03, 0.6, 0.5
-							if (gx >= -GMIN and gy > FACE and gz > FACE)
-								or (gy >= -GMIN and gx > FACE and gz > FACE)
-								or (gz >= -GMIN and gx > FACE and gy > FACE) then
-								connectAssemblies(assemblyA, assemblyB)
-							end
-							local axis, g
-							if gx < -GMIN and gx >= -GMAX and gy > FACE and gz > FACE then axis, g = "X", -gx
-							elseif gy < -GMIN and gy >= -GMAX and gx > FACE and gz > FACE then axis, g = "Y", -gy
-							elseif gz < -GMIN and gz >= -GMAX and gx > FACE and gy > FACE then axis, g = "Z", -gz end
-							if axis then
-								table.insert(fitCandidates, { a = assemblyA, b = assemblyB, text = string.format("%s | %s — %.2f gap on %s (faces nearly meet but don't touch; butt them or close the gap)", a:GetFullName(), b:GetFullName(), g, axis) })
+							local face = qaFaceGap(a, b, 0.03, 0.6, 0.5)
+							if face then
+								report("fitGaps", fitGaps, string.format("%s | %s — %.2f local block-face gap (verify intended clearance)", a:GetFullName(), b:GetFullName(), face.gap), { a, b }, "medium", face)
 							end
 						end
 					end
 					if (a.Position - b.Position).Magnitude < 0.05 and (a.Size - b.Size).Magnitude < 0.05 then
-					if #duplicates < 25 then
-						table.insert(duplicates, a:GetFullName() .. " == " .. b:GetFullName())
-					end
+					report("duplicates", duplicates, a:GetFullName() .. " == " .. b:GetFullName(), { a, b }, "low")
 				elseif ov[a] and ov[a][b] then
 					-- only pairs whose REAL geometry intersects (no phantom overlaps from oblique
 					-- parts). Magnitudes come from rotation-aware world AABBs.
@@ -4371,9 +4398,7 @@ local qaScan = function(inst, options)
 						local ovol = ox * oy * oz
 						local minvol = math.min(A.vol, B.vol)
 						if minvol > 0 and ovol > 0.25 * minvol then
-							if #deepOverlaps < 25 then
-								table.insert(deepOverlaps, string.format("%s overlaps %s (%d%%)", a:GetFullName(), b:GetFullName(), math.floor(100 * ovol / minvol)))
-							end
+							report("deepOverlaps", deepOverlaps, string.format("%s overlaps %s (AABB estimate %d%%)", a:GetFullName(), b:GetFullName(), math.floor(100 * ovol / minvol)), { a, b }, "low")
 						end
 						-- z-fight: a SAME-direction face pair is coincident (within eps) while the
 						-- parts overlap for real on the other two axes — two surfaces at the same
@@ -4389,10 +4414,8 @@ local qaScan = function(inst, options)
 							zf = "Z"
 						end
 						if zf then
-							if #zFights < 25 then
-								table.insert(zFights, string.format("%s vs %s — coplanar faces on %s (z-fight/flicker; inset ~0.05 or separate)", a:GetFullName(), b:GetFullName(), zf))
-							end
-							if args.fix then
+							report("zFights", zFights, string.format("%s vs %s — AABB coplanarity on %s (possible z-fight; verify surfaces)", a:GetFullName(), b:GetFullName(), zf), { a, b }, "low")
+							if fix then
 								local function plane(h)
 									if zf == "X" then return (2 * h.Y) * (2 * h.Z)
 									elseif zf == "Y" then return (2 * h.X) * (2 * h.Z)
@@ -4415,19 +4438,13 @@ local qaScan = function(inst, options)
 			end
 		end
 	end
-	for _, candidate in ipairs(fitCandidates) do
-		if #fitGaps >= 25 then break end
-		if not (connectedAssemblies[candidate.a] and connectedAssemblies[candidate.a][candidate.b]) then
-			table.insert(fitGaps, candidate.text)
-		end
-	end
 	-- disconnected pieces inside each built assembly (drawer front off its tray, handle off panel)
-	assemblyGaps(inst, nearGaps, ov, args.fix and seats or nil, allowed)
+	assemblyGaps(inst, nearGaps, ov, fix and coverage.overlapQueryFailures == 0 and seats or nil, allowed, coverage, report)
 	-- fix=true: nudge each z-fighting part 0.06 off the shared plane (one undo step). Capped: a model
 	-- with MANY coplanar pairs is densely detailed (leaf planks, greebles) where mass-nudging does more
 	-- harm than the flicker — report those instead of shoving 20+ parts around.
 	local zFixed = 0
-	if args.fix and #zfFix > 0 and #zfFix <= 12 then
+	if fix and #zfFix > 0 and #zfFix <= 12 then
 		recorded("BuildKit qa fix z-fights", function()
 			local done = {}
 			for _, f in ipairs(zfFix) do
@@ -4442,7 +4459,7 @@ local qaScan = function(inst, options)
 	end
 	-- fix=true: auto-seat lone floating pieces into the main blob (one undo step).
 	local seated = 0
-	if args.fix and #seats > 0 then
+	if fix and #seats > 0 then
 		recorded("BuildKit qa seat floating parts", function()
 			for _, s in ipairs(seats) do
 				if s.part and s.part.Parent and s.move.Magnitude > 0.001 then
@@ -4455,7 +4472,18 @@ local qaScan = function(inst, options)
 	local center, size = bboxOf(inst)
 	local warnings = {}
 	if n > CAP then
-		table.insert(warnings, string.format("overlap scan skipped: %d parts over %d cap", n, CAP))
+		table.insert(warnings, string.format("partial QA: pair and assembly scans skipped: %d parts over %d cap", n, CAP))
+	end
+	if coverage.leavesSkipped > 0 then
+		table.insert(warnings, string.format("partial QA: %d leaf assembly scan(s) skipped (400-part leaf / 1200-part total cap)", coverage.leavesSkipped))
+	end
+	if coverage.overlapQueryFailures > 0 then
+		table.insert(warnings, string.format("partial QA: %d collision queries failed; connectivity is uncertain", coverage.overlapQueryFailures))
+		coverage.pairScan, coverage.assemblyScan = "partial", "partial"
+	end
+	if n > CAP or coverage.leavesSkipped > 0 or coverage.overlapQueryFailures > 0 then
+		coverage.status = "partial"
+		if n <= CAP then coverage.assemblyScan = "partial" end
 	end
 	if n > 1000 then
 		table.insert(warnings, string.format("high part count: %d", n))
@@ -4463,20 +4491,20 @@ local qaScan = function(inst, options)
 	if unanchoredCount > 0 then
 		table.insert(warnings, string.format("%d unanchored part(s)", unanchoredCount))
 	end
-	if #duplicates > 0 then
-		table.insert(warnings, string.format("%d duplicate-placement pair(s)", #duplicates))
+	if counts.duplicates > 0 then
+		table.insert(warnings, string.format("%d duplicate-placement pair(s)", counts.duplicates))
 	end
-	if #deepOverlaps > 0 then
-		table.insert(warnings, string.format("%d deep-overlap pair(s)", #deepOverlaps))
+	if counts.deepOverlaps > 0 then
+		table.insert(warnings, string.format("%d deep-overlap pair(s)", counts.deepOverlaps))
 	end
-	if #nearGaps > 0 then
-		table.insert(warnings, string.format("%d assembly(ies) with unjoined pieces (gap inside a model)", #nearGaps))
+	if counts.nearGaps > 0 then
+		table.insert(warnings, string.format("%d assembly(ies) without confirmed contact between groups (verify surfaces)", counts.nearGaps))
 	end
-	if #zFights > 0 then
-		table.insert(warnings, string.format("%d coplanar/overlapping surface pair(s) — z-fight FLICKER risk", #zFights))
+	if counts.zFights > 0 then
+		table.insert(warnings, string.format("%d coplanar/overlapping surface pair(s) — possible z-fight risk", counts.zFights))
 	end
-	if #fitGaps > 0 then
-		table.insert(warnings, string.format("%d fit-gap(s) — pieces from different assemblies nearly touch but leave a slot (opt-in fit check; VERIFY vs a capture — rotated parts can false-flag)", #fitGaps))
+	if counts.fitGaps > 0 then
+		table.insert(warnings, string.format("%d local block-face fit-gap(s) (opt-in fit check; verify intended clearance)", counts.fitGaps))
 	end
 	if zFixed > 0 then
 		table.insert(warnings, string.format("fix: nudged %d z-fighting part(s) 0.06 apart (re-run rbx_qa to confirm)", zFixed))
@@ -4485,6 +4513,9 @@ local qaScan = function(inst, options)
 		table.insert(warnings, string.format("fix: seated %d floating part(s) into the model (re-run rbx_qa to confirm)", seated))
 	end
 	local result = {
+		counts = counts,
+		coverage = coverage,
+		issues = issues,
 		target = inst.Name,
 		parts = n,
 		bbox = { center = { center.X, center.Y, center.Z }, size = { size.X, size.Y, size.Z } },
@@ -4817,7 +4848,7 @@ function handlers.scene_dump(args)
 	if not inst then
 		error("target not found: " .. tostring(args.target))
 	end
-	return sceneDump(inst, 800)
+	return sceneDump(inst, 800, nil, args.precise == true)
 end
 
 -- Phase 4 map/edit helpers. These stay in the handler module so the Node side can
@@ -7024,22 +7055,27 @@ function handlers.build(spec)
 		end
 		local bc, bsz = bboxOf(model)
 			-- Auto-QA: unless the panel toggle is off, scan the just-built model for
-			-- z-fights (auto-nudged), deep overlaps, and unjoined/floating pieces, and
+			-- possible z-fights, deep overlaps, and unjoined/floating pieces, and
 			-- return a compact report so correctness issues always surface.
 			local qa = nil
 			local autoQA = plugin:GetSetting("bk_autoQA")
 			if autoQA == nil then autoQA = true end
 			if autoQA and qaScan then
-				local ok, r = pcall(qaScan, model, true)
+				local ok, r = pcall(qaScan, model, { fix = false })
 				if ok and type(r) == "table" then
 					qa = {
-						zfights = #r.zFights,
+						zfights = r.counts.zFights,
 						fixed = r.fixed,
 						seated = r.seated,
-						unjoined = #r.nearGaps,
-						overlaps = #r.deepOverlaps,
+						unjoined = r.counts.nearGaps,
+						overlaps = r.counts.deepOverlaps,
+						counts = r.counts,
+						coverage = r.coverage,
+						issues = r.issues,
 						warnings = r.warnings,
 					}
+				else
+					qa = { coverage = { status = "failed" }, warnings = { "Automatic QA failed: " .. tostring(r) } }
 				end
 			end
 			-- D: surface primitive guards (ball-collapse / degenerate) + prop oversize, even if auto-QA off.
@@ -7725,7 +7761,7 @@ if okWidget and widget then
 	toggleBtn("officialGen", "Official AI gen (mesh/proc)", true)
 	toggleBtn("meshRef", "Use meshes as reference", true)
 	toggleBtn("localImport", "Local-gen import (ComfyUI+Hunyuan)", false)
-	toggleBtn("autoQA", "Auto-QA every build", true)
+	toggleBtn("autoQA", "Auto-QA every build (report only)", true)
 	lbl("VIEWER SYNC", Color3.fromRGB(120, 200, 255), 22)
 	field("liveSyncIntervalMs", "Viewer poll interval (ms)", 1500)
 	toggleBtn("liveSync", "Auto-sync viewer", true)

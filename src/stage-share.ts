@@ -1,4 +1,5 @@
 import { validateBatchOps } from "./schemas.js";
+import { normalizeStageConnections } from "./stage-connections.js";
 import type { StageOp } from "./stage-state.js";
 
 export const STAGE_FORMAT = "buildkit-stage" as const;
@@ -59,12 +60,12 @@ export function validateStageOps(value: unknown, label = ".bkstage"): StageOp[] 
     throw new Error(`Invalid ${label} ops: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  return validated.map((op, index) => {
+  return normalizeStageConnections(validated.map((op, index) => {
     if (!isRecord(op.args)) {
       throw new Error(`Invalid ${label} op ${index + 1}: args must be an object`);
     }
     return { action: op.action, args: { ...op.args } };
-  });
+  }));
 }
 
 export function validateStageArtifact(value: unknown): StageArtifact {
