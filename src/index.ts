@@ -25,8 +25,10 @@ import { decodeStageArtifact, MAX_STAGE_ITEMS } from "./stage-share.js";
 import { loadAsset, parseAssetId } from "./assets.js";
 import { liveSyncPayload, MAX_SYNC_PARTS, normalizeSyncScope, requireRegionEcho } from "./sync-scope.js";
 import { buildDetachedRestartCommand, findListenerPid, runDetachedRestart } from "./dev-reload.js";
-import { LibraryStore, libraryPreview, validateLibraryPreset } from "./library.js";
+import { LibraryStore, libraryPreview, validateLibraryPreset, type LibraryEntry } from "./library.js";
 import { StageRenderer } from "./stage-render.js";
+import { normalizeStageConnections } from "./stage-connections.js";
+import { scanStageIssues, compareStageGeometry } from "../viewer/seam-qa.js";
 import { applyStageReparent, parseStageReparentRequest } from "./stage-reparent.js";
 import { overlayMirrorTransforms, type MirrorTransform } from "./mirror-sync.js";
 import { writeAtomicFile } from "./atomic-file.js";
@@ -113,9 +115,25 @@ type ToolCatalogEntry = {
 // visibility in tools/list. The SDK's registerTool config has no enabled field; disable
 // handles after every tool has been registered, before the stdio transport connects.
 const toolCatalog = new Map<string, ToolCatalogEntry>();
+let sharedViewer = false;
+const stageInstance = randomUUID();
+const sharedStageTools = new Map<string, { schema: z.ZodType; run: (args: any) => Promise<any> }>();
 const nativeRegisterTool = server.registerTool.bind(server);
 const registerTool = ((name: string, config: any, callback: any) => {
-  const handle = nativeRegisterTool(name, config, callback);
+  const shared = ["rbx_stage_build", "rbx_stage_clear", "rbx_stage_commit", "rbx_stage_status", "rbx_stage_qa", "rbx_stage_render"].includes(name);
+  if (shared) sharedStageTools.set(name, { schema: z.object(config.inputSchema), run: callback });
+  const handle = nativeRegisterTool(name, config, async (...args: any[]) => {
+    if (!shared || !sharedViewer) return callback(...args);
+    try {
+      const response = await fetch(`http://127.0.0.1:${VIEWER_PORT}/stage/tool`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, args: args[0], place: bridge.getActivePlace() }), signal: AbortSignal.timeout(180_000),
+      });
+      const result = await response.json() as any;
+      if (!response.ok || !Array.isArray(result.content)) throw new Error(result.error || "viewer owner does not support shared Stage tools; restart it with the updated build");
+      return result;
+    } catch (error) { return errResult(error); }
+  });
   if (handle) {
     toolCatalog.set(name, { handle, title: config.title, description: config.description });
   }
@@ -666,7 +684,7 @@ function stageStatusSummary(stage: StageRuntime, detail = false) {
 }
 
 function stageSnapshot(stage: StageRuntime) {
-  return { ...stage.state.snapshot(), session: stage.id, revision: stage.revision };
+  return { ...stage.state.snapshot(), session: stage.id, instance: stageInstance, revision: stage.revision };
 }
 
 function captureStageEdit(stage: StageRuntime): StageEditState {
@@ -676,7 +694,7 @@ function captureStageEdit(stage: StageRuntime): StageEditState {
 }
 
 function setManualStage(stage: StageRuntime, ops: StageOp[]) {
-  stage.manualOps = structuredClone(ops);
+  stage.manualOps = structuredClone(normalizeStageConnections(ops));
   stage.state.clearManual();
   stage.state.appendManual(stage.manualOps);
 }
@@ -707,7 +725,7 @@ function parseStageOps(value: unknown): StageOp[] {
   });
   const parts = raw.reduce((total, op) => total + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0);
   if (raw.length + parts > MAX_STAGE_ITEMS) throw new Error(`stage ops exceed the ${MAX_STAGE_ITEMS}-item cap`);
-  return validateBatchOps(raw).map((op) => ({ action: op.action, args: { ...(op.args as Record<string, unknown>) } }));
+  return normalizeStageConnections(validateBatchOps(raw).map((op) => ({ action: op.action, args: { ...(op.args as Record<string, unknown>) } })));
 }
 
 // Stage-wide CSG part budget, settable from the viewer. An op that names its own csgMax
@@ -1108,15 +1126,21 @@ registerTool(
   },
 );
 
+function libraryEntrySummary(entry: LibraryEntry) {
+  const { ops, preview, ...metadata } = entry;
+  return { ...metadata, opCount: ops.length, partCount: ops.reduce((n, op) => n + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0), hasPreview: !!preview };
+}
+
 registerTool(
   "rbx_library_save",
   {
     title: "Save staged prop ops to the AI library",
-    description: "Persist validated prop build ops in the shared library without touching Roblox Studio.",
+    description: "Persist validated prop build ops without touching Studio. Returns compact file/count metadata by default, not the submitted geometry again. detail:true includes full ops and preview.",
     inputSchema: {
       name: z.string().min(1),
       ops: z.array(z.object({ action: z.enum(["build", "edit"]), args: z.object({}).passthrough() })),
       category: z.string().min(1).optional(),
+      detail: z.boolean().optional().describe("Include full saved ops and preview; default false."),
     },
   },
   async (args) => {
@@ -1124,7 +1148,7 @@ registerTool(
       const ops = parseStageOps(args.ops);
       const preview = libraryPreview(ops);
       const entry = await libraryStore.save({ name: args.name, ops, preview: preview ? JSON.stringify(preview) : undefined, origin: "ai", kind: "saved", category: args.category ?? null });
-      return textResult(entry);
+      return textResult(args.detail ? entry : libraryEntrySummary(entry));
     } catch (error) {
       return errResult(error);
     }
@@ -1135,11 +1159,13 @@ registerTool(
   "rbx_library_list",
   {
     title: "List saved and recent library props",
-    description: "Refresh the persistent prop library, optionally filtering by origin, kind, or category.",
+    description: "List compact library metadata by default. Filter by file and set detail:true to read one preset's full ops/preview; avoid dumping all geometry into context.",
     inputSchema: {
       origin: z.enum(["user", "ai"]).optional(),
       kind: z.enum(["saved", "recent"]).optional(),
       category: z.string().optional(),
+      file: z.string().optional().describe("Exact library filename to read."),
+      detail: z.boolean().optional().describe("Include full ops and preview; default false."),
     },
   },
   async (args) => {
@@ -1147,7 +1173,8 @@ registerTool(
     if (args.origin) entries = entries.filter((entry) => entry.origin === args.origin);
     if (args.kind) entries = entries.filter((entry) => entry.kind === args.kind);
     if (args.category !== undefined) entries = entries.filter((entry) => entry.category === (args.category || null));
-    return textResult({ entries, categories: libraryStore.listCategories() });
+    if (args.file !== undefined) entries = entries.filter((entry) => entry.file === args.file);
+    return textResult({ entries: args.detail ? entries : entries.map(libraryEntrySummary), categories: libraryStore.listCategories() });
   },
 );
 
@@ -1217,16 +1244,61 @@ registerTool(
     title: "Commit the staged build into real Studio",
     description:
       "Sends every enabled generator op plus manual staged ops into Studio as one atomic batch (identical to calling rbx_batch with the same ops) — " +
-      "the exact same 'batch' bridge call rbx_batch makes, so what you saw staged is what gets built. Studio must be connected for this call only (staging itself works offline).",
-    inputSchema: { session: z.string().optional().describe("Independent stage session id. Default 'default'.") },
+      "the exact same 'batch' bridge call rbx_batch makes, so what you saw staged is what gets built. Studio must be connected for this call only (staging itself works offline). Returns compact QA counts/warnings and saved-file metadata by default; detail:true includes full output.",
+    inputSchema: { session: z.string().optional().describe("Independent stage session id. Default 'default'."), detail: z.boolean().optional().describe("Include full commit QA and recent preset ops; default compact counts/warnings.") },
   },
   async (a) => {
     try {
-      return textResult(await commitStage(stageRuntime(a.session), "ai"));
+      const committed = await commitStage(stageRuntime(a.session), "ai") as { result: any; recent: LibraryEntry };
+      if (a.detail) return textResult(committed);
+      const result = committed.result;
+      return textResult({ result: { ...result, results: Array.isArray(result?.results) ? result.results.map(({ qa, ...row }: any) => ({ ...row, ...(qa ? { qa: { counts: qa.counts, coverage: qa.coverage, warnings: qa.warnings } } : {}) })) : result?.results }, recent: libraryEntrySummary(committed.recent) });
     } catch (e) {
       return errResult(e);
     }
   }
+);
+
+registerTool(
+  "rbx_stage_qa",
+  {
+    title: "Inspect Stage seams and authored joints",
+    description: "Report-only local face/endcap seam checks and authored connections. Returns measured endpoints, repair candidates, total counts and explicit coverage limits. action=preview proposes one translation; action=apply requires that issue id and expectedRevision, records undo. Never certifies arbitrary mesh/CSG contacts.",
+    inputSchema: {
+      session: z.string().optional(),
+      action: z.enum(["scan", "preview", "apply", "compare"]).optional(),
+      target: z.string().optional().describe("compare: exact Studio model/path corresponding to these Stage ops. Read-only primitive transform parity; requires precise-readback plugin version."),
+      issueId: z.string().optional(),
+      expectedRevision: z.number().int().nonnegative().optional(),
+      limit: cap(500).optional(),
+    },
+  },
+  async (a) => {
+    try {
+      const stage = stageRuntime(a.session);
+      if (a.action === "compare") {
+        if (!a.target) throw new Error("compare requires an exact Studio target");
+        const ops = structuredClone(stage.state.getOps()), revision = stage.revision;
+        const dump = await bridge.sendCommand("scene_dump", { target: a.target, precise: true }) as { parts?: unknown; coverage?: unknown; truncated?: boolean };
+        const result = compareStageGeometry(ops, dump), stale = stage.revision !== revision;
+        return textResult({ revision, stale, ...result, clean: !stale && result.clean });
+      }
+      const report = scanStageIssues(stage.state.getOps(), { maxIssues: a.limit ?? 100 });
+      if (!a.action || a.action === "scan") return textResult({ revision: stage.revision, ...report });
+      if (a.expectedRevision !== stage.revision) throw new Error("Stage changed: rescan before previewing or applying a repair");
+      const issue = report.issues.find(issue => issue.id === a.issueId);
+      if (!issue?.fix) throw new Error("Issue is stale, outside the result limit, locked, or has no supported repair");
+      const proposed = structuredClone(stage.state.getOps());
+      (proposed[issue.fix.index].args.parts as unknown[])[issue.fix.partIndex] = issue.fix.patch;
+      const after = scanStageIssues(proposed, { maxIssues: a.limit ?? 100 });
+      if (a.action === "preview") return textResult({ revision: stage.revision, patch: issue.fix, before: report, after });
+      const knownErrors = new Set(report.issues.filter(issue => issue.severity === "error").map(issue => issue.id));
+      if (after.counts.errors > knownErrors.size || after.issues.some(issue => issue.severity === "error" && !knownErrors.has(issue.id))) throw new Error("Repair would introduce authored-joint failures; adjust manually");
+      applyStagePatches(stage, { patches: [issue.fix], expectedRevision: a.expectedRevision }, "Repair seam");
+      broadcastStage(stage);
+      return textResult({ revision: stage.revision, ...scanStageIssues(stage.state.getOps(), { maxIssues: a.limit ?? 100 }) });
+    } catch (e) { return errResult(e); }
+  },
 );
 
 registerTool(
@@ -1247,17 +1319,20 @@ registerTool(
   "rbx_stage_render",
   {
     title: "Render a headless Stage session",
-    description: "Capture the browser Stage for a session without touching Roblox Studio. Reuses one headless browser and an idle-cleaned page per session.",
+    description: "Preferred visual inspection during Stage building: chrome-free browser render, no Studio round-trip. Start with one angle; use opIndex to frame the changed prop and smaller width/height for an overview. Use Studio captures for final materials/CSG/lighting checks and play tests. Image-token savings depend on the model, not PNG byte size.",
     inputSchema: {
       session: z.string().optional().describe("Independent stage session id. Default 'default'."),
       angles: z.array(z.object({ azimuth: z.number(), elevation: z.number() })).min(1).max(8).optional(),
+      width: z.number().int().min(256).max(1600).optional().describe("Image width, default 800."),
+      height: z.number().int().min(256).max(1600).optional().describe("Image height, default 600."),
+      opIndex: z.number().int().nonnegative().optional().describe("Frame one Stage operation (zero-based) instead of the entire map. Other geometry remains visible."),
     },
   },
   async (args) => {
     try {
       const session = stageSessionId(args.session);
       stageRuntime(session);
-      const images = await stageRenderer.render(session, args.angles);
+      const images = await stageRenderer.render(session, args.angles, args);
       return {
         content: images.flatMap((image, index) => [
           { type: "image" as const, data: image.toString("base64"), mimeType: "image/png" },
@@ -2790,6 +2865,8 @@ function applyStagePatches(stage: StageRuntime, data: unknown, label = "Edit sta
   if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray((data as Record<string, unknown>).patches)) {
     throw new Error("stage patches must be an object with a non-empty patches array");
   }
+  const expectedRevision = (data as Record<string, unknown>).expectedRevision;
+  if (expectedRevision !== undefined && expectedRevision !== stage.revision) throw new Error("Stage changed: refresh before applying this edit");
   const rawPatches = (data as { patches: unknown[] }).patches;
   if (rawPatches.length === 0) throw new Error("stage patches must contain at least one patch");
   const patches = rawPatches.map(parseStagePatchRequest);
@@ -2960,12 +3037,33 @@ async function applyClientMirrorTransforms(
   };
 }
 
-function startViewerServer() {
+function startViewerServer(): Promise<void> {
+  return new Promise((resolve, reject) => {
   const server = createServer(async (req, res) => {
     const url = req.url || "/";
     const requestUrl = new URL(url, `http://127.0.0.1:${VIEWER_PORT}`);
     const eventPath = requestUrl.pathname;
     const requestedSession = () => stageRuntime(requestUrl.searchParams.get("session") ?? undefined);
+    if (req.method === "POST" && eventPath === "/stage/tool") {
+      // Only the Stage contract is exposed; never relay arbitrary MCP or Studio tools.
+      const origin = req.headers.origin;
+      if (origin && ![`http://127.0.0.1:${VIEWER_PORT}`, `http://localhost:${VIEWER_PORT}`].includes(origin)) {
+        viewerJson(res, 403, { error: "foreign origin" }); return;
+      }
+      if (!String(req.headers["content-type"] || "").includes("application/json")) {
+        viewerJson(res, 415, { error: "Content-Type must be application/json" }); return;
+      }
+      try {
+        const data = await readViewerJson(req);
+        const tool = sharedStageTools.get(data?.name);
+        if (!tool) { viewerJson(res, 404, { error: "unknown shared Stage tool" }); return; }
+        if ((data.name === "rbx_stage_commit" || (data.name === "rbx_stage_qa" && data.args?.action === "compare")) && data.place !== bridge.getActivePlace()) {
+          viewerJson(res, 409, { error: "agent and viewer owner have different active Studio place filters; align them before commit/compare" }); return;
+        }
+        viewerJson(res, 200, await tool.run(tool.schema.parse(data.args ?? {})));
+      } catch (error) { viewerJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
     if (req.method === "GET" && eventPath.startsWith("/asset/")) {
       const id = parseAssetId(eventPath.slice("/asset/".length));
       if (id === null) {
@@ -3051,6 +3149,15 @@ function startViewerServer() {
       try {
         const stage = requestedSession();
         viewerJson(res, 200, { ok: true, ...stage.history.serialize() });
+      } catch (error) {
+        viewerJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (req.method === "GET" && eventPath === "/stage/qa") {
+      try {
+        const stage = requestedSession();
+        viewerJson(res, 200, { ok: true, revision: stage.revision, ...scanStageIssues(stage.state.getOps()) });
       } catch (error) {
         viewerJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
       }
@@ -3397,22 +3504,20 @@ function startViewerServer() {
       res.end("not found");
     }
   });
-  // Multiple buildkit processes can legitimately coexist (an agent-managed instance
-  // plus a manually-run `start.bat`, or two agents) — the bridge (44760) already
-  // handles this via owner/client fallback. The viewer server has no such thing, so
-  // without this handler a second instance's EADDRINUSE was an unhandled 'error' event,
-  // which crashes the WHOLE process (including its stdio MCP capability) over an
-  // unrelated port conflict. Degrade gracefully instead: this process's tool calls
-  // (stage/scene_dump) still work, they just won't have their own viewer/SSE server —
-  // whichever process already owns 8642 keeps serving it for everyone.
+  // One viewer owns Stage state per port; other MCP processes relay to that owner.
+  // Explicitly different viewer ports still provide independent headless workspaces.
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      console.error(`[buildkit] viewer port ${VIEWER_PORT} already in use by another buildkit process — not starting a second one (that process keeps serving it)`);
+      sharedViewer = true;
+      resolve();
+      console.error(`[buildkit] viewer port ${VIEWER_PORT} already owned; forwarding Stage tools to its owner`);
     } else {
       console.error(`[buildkit] viewer server error: ${err.message}`);
+      reject(err);
     }
   });
-  server.listen(VIEWER_PORT, "127.0.0.1", () => console.error(`[buildkit] viewer: http://localhost:${VIEWER_PORT}`));
+  server.listen(VIEWER_PORT, "127.0.0.1", () => { console.error(`[buildkit] viewer: http://localhost:${VIEWER_PORT}`); resolve(); });
+  });
 }
 
 async function main() {
@@ -3422,7 +3527,7 @@ async function main() {
   stageReady = true;
   for (const stage of stageRuntimes.values()) stage.dirty = false;
   await libraryStore.start();
-  startViewerServer();
+  await startViewerServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[buildkit] MCP server ready (stdio)");

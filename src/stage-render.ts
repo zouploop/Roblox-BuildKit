@@ -4,6 +4,7 @@ export type StageCameraAngle = {
   azimuth: number;
   elevation: number;
 };
+export type StageCaptureOptions = { width?: number; height?: number; opIndex?: number };
 
 type SessionPage = {
   page: Page;
@@ -41,13 +42,16 @@ export class StageRenderer {
     this.launch = options.launch ?? puppeteer.launch;
   }
 
-  async render(session: string, angles: StageCameraAngle[] = [DEFAULT_ANGLE]): Promise<Buffer[]> {
+  async render(session: string, angles: StageCameraAngle[] = [DEFAULT_ANGLE], options: StageCaptureOptions = {}): Promise<Buffer[]> {
     if (!session.trim()) throw new Error("session is required");
     if (!angles.length) throw new Error("at least one camera angle is required");
+    for (const value of [options.width, options.height]) if (value !== undefined && (!Number.isInteger(value) || value < 256 || value > 1600)) throw new Error("capture dimensions must be integers from 256 to 1600");
+    if (options.opIndex !== undefined && (!Number.isInteger(options.opIndex) || options.opIndex < 0)) throw new Error("opIndex must be a non-negative integer");
     const entry = await this.acquire(session);
     try {
       const images: Buffer[] = [];
-      for (const angle of angles) images.push(await this.capture(entry.page, session, angle));
+      await entry.page.setViewport({ width: options.width ?? 800, height: options.height ?? 600, deviceScaleFactor: 1 });
+      for (const angle of angles) images.push(await this.capture(entry.page, session, angle, options.opIndex));
       return images;
     } finally {
       entry.busy = false;
@@ -106,7 +110,7 @@ export class StageRenderer {
     }
   }
 
-  private async capture(page: Page, session: string, angle: StageCameraAngle): Promise<Buffer> {
+  private async capture(page: Page, session: string, angle: StageCameraAngle, opIndex?: number): Promise<Buffer> {
     const url = new URL(this.viewerUrl);
     url.searchParams.set("session", session);
     await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
@@ -119,41 +123,15 @@ export class StageRenderer {
     );
     if (this.settleMs > 0) await new Promise((resolve) => setTimeout(resolve, this.settleMs));
 
-    // Frame the complete build, then remove editor chrome and selection helpers so
-    // headless QA captures geometry instead of a close-up of the default origin.
-    if (page.keyboard && page.click && page.evaluate) {
-      await page.keyboard.down("Control");
-      await page.keyboard.press("a");
-      await page.keyboard.up("Control");
-      await page.click("#frame");
-      await page.evaluate(() => {
-        for (const selector of ["#toolbar", "#dock-slots", "#explorer", "#properties", "#generations", "#history"]) {
-          const element = document.querySelector<HTMLElement>(selector);
-          if (element) element.style.display = "none";
-        }
-        window.dispatchEvent(new Event("resize"));
-      });
-      if (this.settleMs > 0) await new Promise((resolve) => setTimeout(resolve, this.settleMs));
-    }
-
-    const box = await viewport.boundingBox();
-    if (!box) throw new Error("stage viewport has no visible bounds");
-    if (page.mouse.click) await page.mouse.click(box.x + box.width / 2, box.y + 8);
     const azimuth = Number.isFinite(angle.azimuth) ? angle.azimuth : DEFAULT_ANGLE.azimuth;
     const elevation = Number.isFinite(angle.elevation)
       ? Math.max(-85, Math.min(85, angle.elevation))
       : DEFAULT_ANGLE.elevation;
-    const dx = ((azimuth - DEFAULT_ANGLE.azimuth) / 360) * box.height;
-    const dy = ((DEFAULT_ANGLE.elevation - elevation) / 360) * box.height;
-    const x = box.x + box.width / 2;
-    const y = box.y + box.height / 2;
-    if (dx || dy) {
-      await page.mouse.move(x, y);
-      await page.mouse.down({ button: "right" });
-      await page.mouse.move(x + dx, y + dy, { steps: 8 });
-      await page.mouse.up({ button: "right" });
-      if (this.settleMs > 0) await new Promise((resolve) => setTimeout(resolve, this.settleMs));
-    }
+    await page.evaluate(async (view) => {
+      const capture = (globalThis as { __buildkitCapture?: (angle: StageCameraAngle) => Promise<unknown> }).__buildkitCapture;
+      if (!capture) throw new Error("stage capture camera is unavailable");
+      await capture(view);
+    }, { azimuth, elevation, ...(opIndex === undefined ? {} : { opIndex }) });
     return Buffer.from(await viewport.screenshot({ type: "png" }));
   }
 

@@ -48,7 +48,14 @@ After the coordinator has prepared session `map-roads`, the worker loop is:
 5. Inspect every returned image, revise the full op list, clear, and repeat.
 6. Save the accepted exact ops with `rbx_library_save` and clear the session.
 
-Use one to eight angles. A useful map-chunk pass is:
+Use one useful angle for ordinary revisions, then cover unseen sides before acceptance.
+Prefer `rbx_stage_status` summary output; request `detail:true` only when checking bounds
+or diagnosing an operation. `rbx_stage_render` accepts `opIndex` to frame a changed prop
+and `width`/`height` (default 800×600; 480×320 is useful for rough overviews). Raise the
+resolution for small seams. Do not recapture unchanged geometry on every iteration.
+Image tokens depend on the model/harness; smaller PNG bytes are not proof of savings.
+
+Use one to eight angles. A useful final map-chunk pass is:
 
 ```json
 [
@@ -98,7 +105,7 @@ Stage, generator files, or rbx_stage_commit.
 Clear SESSION_ID, build the full candidate with kind:"prop" ops, check detailed status,
 and render it from the required angles. Inspect the actual images and iterate until every
 angle is structurally clean. Save the exact accepted ops with rbx_library_save under
-LIBRARY_CATEGORY, clear SESSION_ID, and return: preset name/file, final ops, bounds,
+LIBRARY_CATEGORY, clear SESSION_ID, and return: preset name/file, bounds,
 anchor/facing, part count, angles checked, and any unresolved seam risk.
 ```
 
@@ -109,7 +116,10 @@ belong in a second wave after the first results are integrated.
 
 The coordinator owns integration:
 
-1. Reject any result lacking final ops, bounds, or multi-angle evidence.
+1. Reject any result lacking a saved preset, bounds, or multi-angle evidence. Read accepted
+   ops with `rbx_library_list({file:"Exact preset.json",detail:true})`; do not ask every
+   worker to paste its full geometry into its completion message. Library save/list and
+   Stage commit return summaries by default; use `detail:true` only when needed.
 2. Check every result against the shared contract before combining it.
 3. For region briefs, concatenate the accepted world-space ops. For reusable local-origin
    assets, place copies using the declared anchor and facing; do not eyeball offsets.

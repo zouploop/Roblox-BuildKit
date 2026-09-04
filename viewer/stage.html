@@ -138,6 +138,13 @@
   #history-controls button { flex:1; }
   #history-position { color:var(--ink-3); font-family:var(--mono); font-size:10px; margin-bottom:6px; }
   #history-list { flex:1 1 auto; min-height:0; overflow:auto; }
+  #issues { top:52px; right:8px; width:286px; height:300px; overflow:auto; }
+  #issues-summary, #issue-detail { padding:var(--s2); overflow-wrap:anywhere; max-height:25%; overflow:auto; box-sizing:border-box; }
+  #issues-list { flex:1; min-height:40px; overflow:auto; }
+  #issues-list button { display:block; width:100%; text-align:left; white-space:normal; }
+  #issue-actions { display:flex; flex:0 0 auto; flex-wrap:wrap; gap:var(--s1); padding:var(--s2); }
+  body.mirror-mode #issues { display:none !important; }
+  body.capture-mode > :not(canvas):not(script) { display:none !important; }
   .history-entry { display:block; width:100%; padding:6px; text-align:left; border:0; border-top:1px solid var(--seam-soft); border-radius:0; background:transparent; }
   .history-entry:first-child { border-top:0; }
   .history-entry.current { color:var(--ink); background:var(--select-dim); box-shadow:inset 2px 0 0 var(--select); }
@@ -421,6 +428,17 @@
   <div id="history-list"><div class="empty">loading...</div></div>
 </aside>
 <div id="selection-marquee" aria-hidden="true"></div>
+<aside id="issues" class="panel" aria-label="Issues">
+  <div class="panel-title">Issues</div>
+  <div id="issues-summary" role="status">Waiting for stage</div>
+  <div id="issues-list"></div>
+  <div id="issue-detail">Select an issue to inspect its seam.</div>
+  <div id="issue-actions">
+    <button id="issue-preview" type="button" disabled>Preview repair</button>
+    <button id="issue-apply" type="button" disabled>Apply repair</button>
+    <button id="issue-intentional" type="button" disabled>Mark intentional</button>
+  </div>
+</aside>
 <script type="importmap">
 { "imports": {
   "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
@@ -436,6 +454,7 @@ import { addMirrorParts, addPart, addPlaceholder, initScene, meshForPart, select
 import { previewCameraFit, previewPlacementDelta } from "./library-preview.js";
 import { deletePatchesForSelection } from "./stage-delete.js";
 import { lockPatchesForSelection } from "./stage-lock.js";
+import { scanStageIssues } from './seam-qa.js';
 
 const searchParams = new URLSearchParams(location.search);
 const mirrorMode = searchParams.get("mirror") === "1";
@@ -586,6 +605,7 @@ let draggingTransform = false;
 let suppressClick = false;
 let marqueeDrag = null;
 let lastStageRevision = -1;
+let lastStageInstance = null;
 let stageClientTransformRevision = 0;
 let stageClientOverlay = null;
 let lastMirrorRevision = -1;
@@ -623,6 +643,7 @@ const typing = () => {
 const layoutKey = "buildkit-layout";
 const legacyLayoutKey = "buildkit-stage-layout";
 const layoutPanelIds = mirrorMode ? ["explorer"] : ["explorer", "properties", "generations", "history"];
+if (!mirrorMode) layoutPanelIds.push("issues");
 const layoutPanels = layoutPanelIds.map((id) => document.getElementById(id));
 const dockSlots = [...document.querySelectorAll(".dock-slot")];
 const dockSlotNames = new Set(dockSlots.map((slot) => slot.dataset.slot));
@@ -729,6 +750,10 @@ function loadLayout() {
     document.getElementById("explorer").dataset.dockSlot = "left";
     document.getElementById("properties").dataset.dockSlot = "right";
   }
+  if (!mirrorMode && !panels.issues) {
+    docked.set("issues", "right");
+    document.getElementById("issues").dataset.dockSlot = "right";
+  }
 }
 function stack(slot) {
   if(dockStacks.has(slot)) return dockStacks.get(slot);
@@ -752,6 +777,13 @@ function mountDockedPanels() {
   updateViewportLayout();
 }
 function updateViewportLayout() {
+  if (document.body.classList.contains("capture-mode")) {
+    for (const side of ["left", "right", "top", "bottom"]) document.documentElement.style.setProperty(`--canvas-${side}`, "0px");
+    renderer.setSize(innerWidth, innerHeight, false);
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    return;
+  }
   layoutDockSlots();
   const rects = dockTargetRects();
   for (const [slot, value] of dockStacks) {
@@ -1122,6 +1154,7 @@ function replaceStage(ops, previousOps = stageOps) {
   if (buildAuto?.checked) startBuildPlayback();
   else stopBuildPlayback(true);
   restoreCameraView(cameraView);
+  refreshIssues();
   return true;
 }
 
@@ -1525,12 +1558,13 @@ function parseStageSync(raw) {
   if (Array.isArray(payload)) return { ops };
   if (!payload || typeof payload !== "object") return null;
   const revision = Number.isInteger(payload.revision) && payload.revision >= 0 ? payload.revision : undefined;
+  const instance = typeof payload.instance === "string" ? payload.instance : undefined;
   if (payload.dump !== undefined && !isDump(payload.dump)) return null;
   if (payload.errors !== undefined && (!Array.isArray(payload.errors) || !payload.errors.every((e) => typeof e === "string"))) return null;
-  if (!Object.prototype.hasOwnProperty.call(payload, "generations")) return { ops, dump: payload.dump, ...(revision === undefined ? {} : { revision }) };
+  if (!Object.prototype.hasOwnProperty.call(payload, "generations")) return { ops, dump: payload.dump, instance, ...(revision === undefined ? {} : { revision }) };
   const generations = payload.generations;
   return Array.isArray(generations) && generations.every(isGenerationState)
-    ? { ops, generations, dump: payload.dump, ...(revision === undefined ? {} : { revision }) }
+    ? { ops, generations, dump: payload.dump, instance, ...(revision === undefined ? {} : { revision }) }
     : null;
 }
 
@@ -2747,12 +2781,13 @@ function stageModelSnapshot() {
 function rememberStageSync(sync) {
   const candidate = {
     ops: clone(sync.ops),
+    instance: sync.instance,
     ...(sync.generations ? { generations: clone(sync.generations) } : {}),
     ...(sync.dump !== undefined ? { dump: clone(sync.dump) } : {}),
     ...(sync.revision === undefined ? {} : { revision: sync.revision }),
   };
   const currentRevision = deferredStageSync?.revision;
-  if (Number.isInteger(currentRevision) && Number.isInteger(candidate.revision) && candidate.revision < currentRevision) return;
+  if (candidate.instance === deferredStageSync?.instance && Number.isInteger(currentRevision) && Number.isInteger(candidate.revision) && candidate.revision < currentRevision) return;
   deferredStageSync = candidate;
 }
 
@@ -3231,7 +3266,10 @@ function updateCsgLabel() {
 }
 
 function applyStageSync(sync) {
-  if (Number.isInteger(sync.revision) && sync.revision < lastStageRevision) return true;
+  const restarted = sync.instance && sync.instance !== lastStageInstance;
+  if (!restarted && Number.isInteger(sync.revision) && sync.revision < lastStageRevision) return true;
+  const previousRevision = lastStageRevision, previousInstance = lastStageInstance;
+  if (sync.instance) lastStageInstance = sync.instance;
   if (Number.isInteger(sync.revision)) lastStageRevision = sync.revision;
   const previousOps = stageOps;
   const previousDump = stageDump;
@@ -3240,6 +3278,8 @@ function applyStageSync(sync) {
   if (sync.dump !== undefined) stageDump = sync.dump;
   if (sync.generations !== undefined) stageGenerations = Array.isArray(sync.generations) ? sync.generations : [];
   if (!replaceStage(stageOps, previousOps)) {
+    lastStageRevision = previousRevision;
+    lastStageInstance = previousInstance;
     stageOps = previousOps;
     stageDump = previousDump;
     stageGenerations = previousGenerations;
@@ -3250,6 +3290,8 @@ function applyStageSync(sync) {
   renderExplorer();
   renderProperties();
   markSynced();
+  renderer.render(scene, camera);
+  window.__buildkitStageReady = { session: stageSession, revision: lastStageRevision, instance: lastStageInstance };
   void loadHistory();
   return true;
 }
@@ -3257,14 +3299,240 @@ function applyStageSync(sync) {
 function frameSelection() {
   if (!selected?.object) return setStatus("Select an object to frame");
   const box = selectionBounds();
-  if (box.isEmpty()) return;
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const distance = Math.max(size.x, size.y, size.z, 1) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) * 1.6;
   const direction = camera.position.clone().sub(controls.target).normalize();
-  camera.position.copy(center).add(direction.multiplyScalar(distance));
+  frameBounds(box, direction);
+}
+
+function frameBounds(box, direction) {
+  if (box.isEmpty()) box = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+  const center = box.getCenter(new THREE.Vector3());
+  if (!direction.lengthSq()) direction.set(1, 1, 1);
+  direction.normalize();
+  const right = new THREE.Vector3().crossVectors(camera.up, direction).normalize();
+  const up = new THREE.Vector3().crossVectors(direction, right).normalize();
+  const tanY = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const tanX = tanY * camera.aspect;
+  let distance = 1, depth = 0;
+  for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+    const corner = new THREE.Vector3(x, y, z).sub(center), along = corner.dot(direction);
+    distance = Math.max(distance, along + 1.15 * Math.max(Math.abs(corner.dot(right)) / tanX, Math.abs(corner.dot(up)) / tanY));
+    depth = Math.max(depth, Math.abs(along));
+  }
+  distance = Math.max(distance, depth + 0.1);
+  camera.zoom = 1;
+  camera.near = Math.max(0.01, (distance - depth) / 2);
+  camera.far = Math.max(100, (distance + depth) * 2);
+  camera.position.copy(center).addScaledVector(direction, distance);
   controls.target.copy(center);
+  camera.updateProjectionMatrix();
   controls.update();
+  camera.updateMatrixWorld();
+}
+
+// Direct capture avoids OrbitControls drag deltas and frames after chrome is hidden.
+window.__buildkitCapture = async ({ azimuth = 45, elevation = 25, opIndex } = {}) => {
+  if (!Number.isFinite(azimuth) || !Number.isFinite(elevation)) throw new Error("Camera angles must be finite");
+  const bounds = new THREE.Box3();
+  if (opIndex === undefined) bounds.setFromObject(group);
+  else {
+    if (!Number.isInteger(opIndex) || opIndex < 0 || opIndex >= stageOps.length) throw new Error("Capture opIndex is out of range");
+    for (const object of objectsForSelection(opIndex)) bounds.expandByObject(object);
+    if (bounds.isEmpty()) throw new Error("Capture operation has no rendered geometry");
+  }
+  document.body.classList.add("capture-mode");
+  stopBuildPlayback(true);
+  keys.clear();
+  setSelection([]);
+  clearIssueOverlay();
+  updateViewportLayout();
+  const az = THREE.MathUtils.degToRad(azimuth), el = THREE.MathUtils.degToRad(Math.max(-85, Math.min(85, elevation)));
+  frameBounds(bounds, new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  renderer.render(scene, camera);
+  return { position: camera.position.toArray(), target: controls.target.toArray(), aspect: camera.aspect };
+};
+
+// Issues use the engine's geometry fingerprint; no stage mutation until Apply.
+const issuesList = document.getElementById("issues-list");
+const issuesSummary = document.getElementById("issues-summary");
+const issueDetail = document.getElementById("issue-detail");
+const issuePreviewButton = document.getElementById("issue-preview");
+const issueApplyButton = document.getElementById("issue-apply");
+const issueIntentionalButton = document.getElementById("issue-intentional");
+const issueStorageKey = `buildkit-intentional-issues:${stageSession}`;
+let intentionalIssues = new Set();
+try {
+  const saved = JSON.parse(localStorage.getItem(issueStorageKey) || "[]");
+  if (Array.isArray(saved)) intentionalIssues = new Set(saved.filter((id) => typeof id === "string"));
+} catch {}
+let issueReport = { issues: [], coverage: { status: "partial" } };
+let activeIssueId = null, previewIssueId = null, appliedIssueId = null, issueApplying = false;
+let issueScanRevision = -1, previewIssueRevision = null;
+const issueOverlay = new THREE.Group();
+scene.add(issueOverlay);
+
+function clearIssueOverlay() {
+  issueOverlay.traverse((node) => { node.geometry?.dispose(); node.material?.dispose(); });
+  issueOverlay.clear();
+  previewIssueId = null;
+  previewIssueRevision = null;
+}
+
+function issueConnector(a, b, color) {
+  if (![a, b].every((point) => Array.isArray(point) && point.length === 3 && point.every(Number.isFinite))) return;
+  const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]);
+  const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color, depthTest: false, depthWrite: false }));
+  const points = new THREE.Points(geometry.clone(), new THREE.PointsMaterial({ color, size: 9, sizeAttenuation: false, depthTest: false, depthWrite: false }));
+  line.renderOrder = points.renderOrder = 100;
+  issueOverlay.add(line, points);
+}
+
+function currentIssue() { return issueReport.issues.find((issue) => issue.id === activeIssueId); }
+
+function issueFingerprint(issue) {
+  // Invalid authored references may lack a geometry ID; bind those to their op too.
+  return issue?.type === "invalid-connection" ? JSON.stringify([issue.id, stageOps[issue.a?.opIndex]]) : issue?.id;
+}
+
+function repairForIssue(issue) {
+  const fix = issue?.fix, args = stageOps[fix?.index]?.args, part = args?.parts?.[fix?.partIndex];
+  if (!fix || !Number.isInteger(fix.index) || !Number.isInteger(fix.partIndex) || fix.partIndex < 0 || !part ||
+      part.locked || args.locked || issue.confidence !== "measured" || !Array.isArray(fix.patch?.pos) || fix.patch.pos.length !== 3 || !fix.patch.pos.every(Number.isFinite)) return null;
+  if (Math.hypot(...fix.patch.pos.map((value, index) => value - vec3(part.pos)[index])) > 0.600001) return null;
+  // /stage/patches replaces a part: retain every field supplied by the engine.
+  return { index: fix.index, partIndex: fix.partIndex, patch: clone(fix.patch) };
+}
+
+function renderIssueActions() {
+  const issue = currentIssue(), intentional = intentionalIssues.has(issueFingerprint(issue));
+  const fix = issueScanRevision >= 0 && !intentional && repairForIssue(issue);
+  issuePreviewButton.disabled = !fix || issueApplying || appliedIssueId === issue?.id;
+  issueApplyButton.disabled = !fix || previewIssueId !== issue?.id || issueApplying || appliedIssueId === issue?.id;
+  issueIntentionalButton.disabled = !issue || issueApplying;
+  issueIntentionalButton.textContent = intentional ? "Review again" : "Mark intentional";
+  if (issue) issueDetail.textContent = `${issue.message} · ${issue.severity} · confidence ${issue.confidence}${Number.isFinite(issue.gap) ? ` · gap ${issue.gap} studs` : ""}${intentional ? " · Intentional (this browser)" : ""}${previewIssueId === issue.id ? " · Cyan: proposed translation; Apply records one undoable edit." : ""}`;
+  else issueDetail.textContent = "Select an issue to inspect its seam.";
+}
+
+function renderIssues() {
+  const ignored = issueReport.issues.filter((issue) => intentionalIssues.has(issueFingerprint(issue))).length;
+  const counts = issueReport.counts, coverage = issueReport.coverage;
+  issuesSummary.textContent = `${counts?.total ?? issueReport.issues.length} total (${counts?.errors ?? 0} errors, ${counts?.warnings ?? 0} warnings) · ${issueReport.issues.length} shown · ${ignored} shown intentional · ${coverage.status} within limited scope: ${coverage.scope || "measured seams"}. ${coverage.unsupportedParts ?? 0} unsupported parts. ${coverage.unchecked || ""}`;
+  issuesList.replaceChildren();
+  for (const issue of issueReport.issues) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${intentionalIssues.has(issueFingerprint(issue)) ? "Intentional · " : ""}${issue.severity}: ${issue.message}`;
+    button.setAttribute("aria-pressed", String(issue.id === activeIssueId));
+    button.onclick = () => inspectIssue(issue.id);
+    issuesList.append(button);
+  }
+  renderIssueActions();
+}
+
+function refreshIssues() {
+  if (mirrorMode) return;
+  clearIssueOverlay();
+  try {
+    issueReport = scanStageIssues(stageOps);
+    issueScanRevision = lastStageRevision;
+    const ids = new Set(issueReport.issues.map((issue) => issue.id));
+    const fingerprints = new Set(issueReport.issues.map(issueFingerprint));
+    intentionalIssues = new Set([...intentionalIssues].filter((id) => fingerprints.has(id)));
+    try { localStorage.setItem(issueStorageKey, JSON.stringify([...intentionalIssues])); } catch {}
+    if (!ids.has(activeIssueId)) activeIssueId = null;
+    if (!ids.has(appliedIssueId)) appliedIssueId = null;
+    renderIssues();
+    const issue = currentIssue();
+    if (issue) issueConnector(issue.pointA, issue.pointB, 0xff3333);
+  } catch (error) {
+    issueReport = { issues: [], coverage: { status: "partial" } };
+    activeIssueId = null;
+    renderIssues();
+    issuesSummary.textContent = `Scan unavailable: ${error.message}`;
+  }
+}
+
+function inspectIssue(id, preview = false) {
+  if (mirrorMode) return null;
+  const issue = issueReport.issues.find((item) => item.id === id);
+  if (!issue) return null;
+  activeIssueId = id;
+  clearIssueOverlay();
+  selectByRefs([issue.a, issue.b], issue.a);
+  if (!selectedObjects.length && issue.a?.partIndex === -1) selectStageOp(issue.a.opIndex);
+  transform?.detach(); // Keep the seam connector visible beneath the selection gizmo.
+  issueConnector(issue.pointA, issue.pointB, 0xff3333);
+  const points = [issue.pointA, issue.pointB].filter((point) => Array.isArray(point) && point.length === 3 && point.every(Number.isFinite));
+  const box = points.length ? new THREE.Box3().setFromPoints(points.map((point) => new THREE.Vector3(...point))).expandByScalar(0.75) : selectionBounds();
+  if (box.isEmpty() && issue.a) {
+    for (const object of objectsForSelection(issue.a.opIndex)) box.expandByObject(object);
+  }
+  const fix = issueScanRevision >= 0 && !intentionalIssues.has(issueFingerprint(issue)) && repairForIssue(issue);
+  if (preview && fix) {
+    const args = stageOps[fix.index].args, part = args.parts[fix.partIndex];
+    const from = new THREE.Vector3(...vec3(args.center)).add(new THREE.Vector3(...vec3(part.pos)));
+    const to = new THREE.Vector3(...vec3(args.center)).add(new THREE.Vector3(...fix.patch.pos));
+    issueConnector(from.toArray(), to.toArray(), 0x44ddff);
+    box.expandByPoint(from).expandByPoint(to);
+    previewIssueId = id;
+    previewIssueRevision = issueScanRevision;
+  }
+  frameBounds(box, camera.position.clone().sub(controls.target));
+  renderIssues();
+  return { id, selected: selectedObjects.map(({ opIndex, partIndex }) => ({ opIndex, partIndex })), preview: previewIssueId === id };
+}
+window.__buildkitInspectIssue = inspectIssue;
+issuePreviewButton.onclick = () => inspectIssue(activeIssueId, true);
+issueIntentionalButton.onclick = () => {
+  const issue = currentIssue();
+  if (!issue || issueApplying) return;
+  const fingerprint = issueFingerprint(issue);
+  if (intentionalIssues.has(fingerprint)) intentionalIssues.delete(fingerprint);
+  else intentionalIssues.add(fingerprint);
+  try { localStorage.setItem(issueStorageKey, JSON.stringify([...intentionalIssues])); }
+  catch { setStatus("Intentional exception lasts only until reload; browser storage unavailable", "error"); }
+  clearIssueOverlay();
+  issueConnector(issue.pointA, issue.pointB, 0xff3333);
+  renderIssues();
+};
+issueApplyButton.onclick = async () => {
+  const issue = currentIssue(), fix = repairForIssue(issue);
+  if (mirrorMode || !fix || intentionalIssues.has(issueFingerprint(issue)) || previewIssueId !== issue.id || issueApplying || appliedIssueId === issue.id) return;
+  if (previewIssueRevision !== lastStageRevision || issueScanRevision !== lastStageRevision || previewIssueRevision < 0) {
+    clearIssueOverlay();
+    renderIssueActions();
+    return setStatus("Stage revision changed; preview the repair again", "error");
+  }
+  if (stageMutationBusy() || draggingTransform || stageClientOverlay) return setStatus("Wait for the current edit to sync, then preview again", "error");
+  // Revalidate the exact geometry and proposed translation immediately before sending.
+  let freshReport, fresh;
+  try {
+    freshReport = scanStageIssues(stageOps);
+    fresh = freshReport.issues.find((item) => item.id === issue.id);
+  }
+  catch (error) { return setStatus(`Repair scan failed: ${error.message}`, "error"); }
+  if (JSON.stringify(repairForIssue(fresh)) !== JSON.stringify(fix)) return refreshIssues();
+  try {
+    const proposed = clone(stageOps);
+    proposed[fix.index].args.parts[fix.partIndex] = fix.patch;
+    const after = scanStageIssues(proposed);
+    const knownErrors = new Set(freshReport.issues.filter((item) => item.severity === "error").map((item) => item.id));
+    // A constant error count can hide a newly broken joint. Geometry fingerprints
+    // conservatively reject changed errors too; unseen errors cannot be certified.
+    if (after.counts.errors > knownErrors.size || after.issues.some((item) => item.severity === "error" && !knownErrors.has(item.id))) {
+      return setStatus("Repair would introduce authored-joint failures; adjust manually", "error");
+    }
+  } catch (error) { return setStatus(`Repair preview scan failed: ${error.message}`, "error"); }
+  issueApplying = true;
+  renderIssueActions();
+  try {
+    const data = await postStage("/stage/patches", { patches: [fix], expectedRevision: previewIssueRevision }, "repair seam");
+    appliedIssueId = issue.id;
+    if (data.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid repair snapshot");
+    clearIssueOverlay();
+  } catch (error) { setStatus(`Repair failed: ${error.message}`, "error"); }
+  finally { issueApplying = false; renderIssueActions(); }
 }
 
 function stageEuler(object) {
@@ -3976,7 +4244,6 @@ es.addEventListener("stage-sync", (e) => {
     setStatus("invalid stage-sync - keeping last-good render", "error");
     return;
   }
-  window.__buildkitStageReady = { session: stageSession, revision: sync.revision ?? null };
   setStatus("synced - click a part to select");
 });
 es.addEventListener("mirror-sync", (e) => {

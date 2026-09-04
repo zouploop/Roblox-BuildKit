@@ -1,8 +1,9 @@
-import { watch, type FSWatcher } from "node:fs";
+import { readFileSync, watch, type FSWatcher } from "node:fs";
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import vm from "node:vm";
 import { validateBatchOps } from "./schemas.js";
+import { normalizeStageConnections } from "./stage-connections.js";
 import type { GenerationState, StageOp } from "./stage-state.js";
 
 export type GeneratorOptions = {
@@ -15,6 +16,10 @@ export type GeneratorState = GenerationState;
 
 const DEFAULT_TIMEOUT_MS = 100;
 const DEFAULT_MAX_OPS = 5_000;
+// Read trusted local source once; create the functions inside each VM so their
+// constructors/prototypes never provide a new route to the host Function.
+const BUILDKIT_SOURCE = readFileSync(new URL("../viewer/build-primitives.js", import.meta.url), "utf8")
+  .replace(/\bexport\s+function\s+/g, "function ");
 
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -52,7 +57,7 @@ function generatedOps(raw: unknown, filename: string, maxOps: number): StageOp[]
     return { action: op.action, args: op.args } as { action: "build" | "edit"; args: Record<string, unknown> };
   });
 
-  return validateBatchOps(shaped) as StageOp[];
+  return normalizeStageConnections(validateBatchOps(shaped) as StageOp[]);
 }
 
 export function runGeneratorSource(source: string, filename = "generator.js", options: GeneratorOptions = {}): StageOp[] {
@@ -69,14 +74,18 @@ export function runGeneratorSource(source: string, filename = "generator.js", op
   sandbox.console = { log() {}, warn() {}, error() {} };
 
   const code = exportedSource(source);
-  const script = `(function(module, exports, args) {
+  const script = `(function(module, exports, args, buildkit) {
 "use strict";
 ${code}
 module.exports.generate = module.exports.generate || (typeof generate === "function" ? generate : undefined);
 const __generate = typeof module.exports === "function" ? module.exports : module.exports.generate || module.exports.default;
 if (typeof __generate !== "function") throw new Error("generator must export generate(args)");
 return __generate(args);
-})(module, exports, args)`;
+})(module, exports, args, (function() {
+"use strict";
+${BUILDKIT_SOURCE}
+return Object.freeze({ beamBetween, railingPath, bridgeBetween });
+})())`;
   let result: unknown;
   try {
     result = new vm.Script(script, { filename }).runInNewContext(sandbox, {

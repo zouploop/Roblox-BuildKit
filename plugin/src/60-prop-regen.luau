@@ -64,6 +64,8 @@ local function build()
 		p.Transparency = ps.transparency or 0
 		if ps.canCollide ~= nil then p.CanCollide = ps.canCollide end
 		p.TopSurface = Enum.SurfaceType.Smooth; p.BottomSurface = Enum.SurfaceType.Smooth
+		if ps.name then p.Name = ps.name end
+		if type(ps.id) == "string" then p:SetAttribute("BuildKitPartId", ps.id) end
 		if ps.op then p:SetAttribute("__op", tostring(ps.op)) end
 		if ps.negate then p:SetAttribute("__negate", true) end
 		p.Parent = model
