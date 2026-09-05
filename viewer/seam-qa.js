@@ -7,13 +7,15 @@ const dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
 const len=a=>Math.hypot(...a);
 const vec=v=>Array.isArray(v)&&v.length===3&&v.every(Number.isFinite);
 const ZERO=[0,0,0];
-function rotate(v,rot=ZERO) {
+export function rotateStageVector(v,rot=ZERO) {
   const [x,y,z]=rot.map(d=>d*Math.PI/180),[sx,cx,sy,cy,sz,cz]=[Math.sin(x),Math.cos(x),Math.sin(y),Math.cos(y),Math.sin(z),Math.cos(z)];
   const a=[v[0]*cz-v[1]*sz,v[0]*sz+v[1]*cz,v[2]];
   const b=[a[0]*cy+a[2]*sy,a[1],-a[0]*sy+a[2]*cy];
   return [b[0],b[1]*cx-b[2]*sx,b[1]*sx+b[2]*cx];
 }
-const world=(p,v)=>add(p.center,rotate(v,p.raw.rot));
+const rotate=rotateStageVector;
+export function stageWorldPoint(center,rot,v) { return add(center,rotateStageVector(v,rot)); }
+const world=(p,v)=>stageWorldPoint(p.center,p.raw.rot,v);
 function fingerprint(a,b,extra='') {
   const text=JSON.stringify([a.ref,b?.ref,a.center,a.raw,b?.center,b?.raw,extra]);
   let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);
@@ -55,7 +57,7 @@ function faceGap(a,b,tolerance,maxGap) {
     const area=polygonArea(polygon);if(area<0.001)continue;
     const c=polygon.reduce((s,p)=>s.map((v,i)=>v+p[i]/polygon.length),[0,0]);
     const pointA=add(A.c,add(mul(A.u,c[0]),mul(A.v,c[1]))),pointB=add(pointA,mul(A.n,gap));
-    const candidate={gap,pointA,pointB,area,coverage:area/Math.min(A.area,B.area),confidence:'measured',type:'face-gap'};
+    const candidate={gap,pointA,pointB,area,coverage:area/Math.min(A.area,B.area),confidence:'measured',type:'face-gap',region:{polygon,origin:A.c,u:A.u,v:A.v}};
     if(!best||gap<best.gap)best=candidate;
   }
   return best;
@@ -79,10 +81,10 @@ function flatten(ops) {
     const args=op.args??{},lookup={ids:new Map(),names:new Map()};byOp[opIndex]=lookup;
     if(op.action!=='build'||args.kind!=='prop'||!Array.isArray(args.parts)){unsupported.push({opIndex,reason:'non-prop geometry'});return;}
     args.parts.forEach((raw,partIndex)=>{
-      if(!vec(raw.size)||raw.size.some(v=>v<=0)||!vec(raw.pos??ZERO)||!vec(raw.rot??ZERO)||!vec(args.center??ZERO)){unsupported.push({opIndex,partIndex,reason:'invalid geometry'});return;}
+      if(!raw||typeof raw!=='object'||Array.isArray(raw)||!vec(raw.size)||raw.size.some(v=>v<=0)||!vec(raw.pos??ZERO)||!vec(raw.rot??ZERO)||!vec(args.center??ZERO)){unsupported.push({opIndex,partIndex,reason:'invalid geometry'});return;}
       const shape=(raw.shape??'box').toLowerCase(),center=add(args.center??ZERO,raw.pos??ZERO),axes=[[1,0,0],[0,1,0],[0,0,1]].map(v=>rotate(v,raw.rot));
       const half=raw.size.map(v=>v/2),extent=[0,1,2].map(i=>axes.reduce((s,v,j)=>s+Math.abs(v[i])*half[j],0));
-      const p={ref:{opIndex,partIndex},raw,center,axes,half,min:sub(center,extent),max:add(center,extent),shape,locked:raw.locked||args.locked};
+      const p={ref:{opIndex,partIndex},raw,center,axes,half,min:sub(center,extent),max:add(center,extent),shape,kind:args.kind,locked:raw.locked||args.locked};
       p.supported=!args.csg&&!raw.negate&&(!raw.op||raw.op==='union')&&['box','cylinder'].includes(shape);
       p.faces=shape==='box'?boxFaces(p):[];
       if(!p.supported)unsupported.push({...p.ref,reason:args.csg?'CSG surface':'unsupported surface: '+shape});
@@ -92,19 +94,125 @@ function flatten(ops) {
   });
   return {parts,byOp,unsupported};
 }
+function segmentBoxInterval(a,b,p,padding=0) {
+  const delta=sub(b,a),localA=p.axes.map(axis=>dot(sub(a,p.center),axis)),localD=p.axes.map(axis=>dot(delta,axis));
+  let enter=0,exit=1;
+  for(let i=0;i<3;i++) {
+    const half=p.half[i]+padding;
+    if(Math.abs(localD[i])<1e-10) { if(Math.abs(localA[i])>half)return null; continue; }
+    const first=(-half-localA[i])/localD[i],last=(half-localA[i])/localD[i];
+    enter=Math.max(enter,Math.min(first,last));exit=Math.min(exit,Math.max(first,last));
+    if(enter>exit)return null;
+  }
+  return [enter,exit];
+}
+function segmentPartInterval(a,b,p,padding=0) {
+  const localA=p.axes.map(axis=>dot(sub(a,p.center),axis)),localD=p.axes.map((axis)=>dot(sub(b,a),axis));
+  if(p.shape==='box')return segmentBoxInterval(a,b,p,padding);
+  if(p.shape!=='cylinder')return null;
+  const halfX=p.half[0]+padding,r=Math.min(p.half[1],p.half[2])+padding;
+  let enter=0,exit=1;
+  if(Math.abs(localD[0])<1e-10) { if(Math.abs(localA[0])>halfX)return null; }
+  else {
+    const first=(-halfX-localA[0])/localD[0],last=(halfX-localA[0])/localD[0];
+    enter=Math.max(enter,Math.min(first,last));exit=Math.min(exit,Math.max(first,last));
+    if(enter>exit)return null;
+  }
+  const radial=(t)=>{const y=localA[1]+localD[1]*t,z=localA[2]+localD[2]*t;return y*y+z*z;};
+  const radialSpeed=localD[1]*localD[1]+localD[2]*localD[2];
+  const closest=radialSpeed<1e-20?enter:Math.max(enter,Math.min(exit,-(localA[1]*localD[1]+localA[2]*localD[2])/radialSpeed));
+  return radial(closest)<=r*r? [enter,exit]:null;
+}
+function treadLike(p) { return /tread|step|stair|deck/i.test(`${p.raw.name??''} ${p.kind??''}`); }
+function supportCoverage(support,high) {
+  if(support.shape!=='box'||high.shape!=='box')return 0;
+  const corners=p=>[[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx,sz])=>add(p.center,add(mul(p.axes[0],sx*p.half[0]),mul(p.axes[2],sz*p.half[2])))).map(point=>[point[0],point[2]]);
+  const supportPolygon=convexHull(corners(support)),highPolygon=convexHull(corners(high));
+  return polygonArea(intersectPolygon(supportPolygon,highPolygon))/Math.max(polygonArea(highPolygon),1e-8);
+}
+function axisAlignedBox(p) {
+  return p.shape==='box'&&p.axes.every(axis=>{
+    const largest=Math.max(...axis.map(value=>Math.abs(value)));
+    return largest>=1-1e-6&&axis.filter(value=>Math.abs(value)>1e-6).length===1;
+  });
+}
+function nextTreadSupport(a,b,parts,tolerance,budget) {
+  const treadCandidate=treadLike(a)||treadLike(b);
+  if(!treadCandidate)return {checks:0,treadCandidate:false};
+  const rise=Math.abs(a.center[1]-b.center[1]);
+  if(rise<=tolerance)return {checks:0,treadCandidate:true,rise};
+  const high=a.center[1]>=b.center[1]?a:b,low=high===a?b:a;
+  let checks=0;
+  const check=(support)=>{
+    if(checks>=budget)return {checks,treadCandidate:true,budgetExceeded:true};
+    checks++;
+    const verticalGap=high.min[1]-support.max[1];
+    if(axisAlignedBox(support)&&axisAlignedBox(high)&&support.supported&&support!==high&&support.center[1]<high.center[1]&&verticalGap>=-tolerance&&verticalGap<=tolerance&&supportCoverage(support,high)>=.98) return {part:support,mode:'support-contact',checks};
+    return undefined;
+  };
+  const first=check(low);
+  if(first&&first.part)return first;
+  if(checks>=budget)return {checks,treadCandidate:true,rise,budgetExceeded:true};
+  for(const support of parts) {
+    if(support===a||support===b||support===low)continue;
+    const found=check(support);
+    if(found&&found.part)return found;
+    if(checks>=budget)return {checks,treadCandidate:true,rise,budgetExceeded:true};
+  }
+  return {checks,treadCandidate:true,rise};
+}
+function convexHull(points) {
+  const sorted=[...points].sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[];for(const point of sorted){while(lower.length>=2&&cross(lower.at(-2),lower.at(-1),point)<=0)lower.pop();lower.push(point);}
+  const upper=[];for(const point of sorted.reverse()){while(upper.length>=2&&cross(upper.at(-2),upper.at(-1),point)<=0)upper.pop();upper.push(point);}
+  return lower.slice(0,-1).concat(upper.slice(0,-1));
+}
+function blockerCoverage(part,data) {
+  if(part.shape!=='box'||!data.region)return 0;
+  const {origin,u,v,polygon}=data.region,project=(point)=>[dot(sub(point,origin),u),dot(sub(point,origin),v)],corners=[];
+  for(const sx of [-1,1])for(const sy of [-1,1])for(const sz of [-1,1])corners.push(add(part.center,add(add(mul(part.axes[0],sx*part.half[0]),mul(part.axes[1],sy*part.half[1])),mul(part.axes[2],sz*part.half[2]))));
+  const covered=polygonArea(intersectPolygon(convexHull(corners.map(project)),polygon));
+  return covered/Math.max(polygonArea(polygon),1e-8);
+}
+function classifyGap(a,b,data,parts,tolerance,budget) {
+  if(budget<=0)return {type:data.type,classification:'seam',confidence:'unchecked',classificationConfidence:'unchecked',hint:'classification budget exhausted',classificationChecks:0,classificationBudgetExceeded:true};
+  const support=nextTreadSupport(a,b,parts,tolerance,budget);
+  let checks=support.checks;
+  if(support.part)return {type:'clearance',classification:'next-tread-support',reason:support.mode,support:support.part.ref,classificationConfidence:'proven',classificationChecks:checks};
+  let hint=support.treadCandidate?{reason:'tread-like gap without proven support'}:null;
+  if(support.budgetExceeded)return {type:data.type,classification:'seam',confidence:'unchecked',classificationConfidence:'unchecked',hint:'classification budget exhausted',classificationChecks:checks,classificationBudgetExceeded:true};
+  for(const part of parts) {
+    if(part===a||part===b||!data.pointA||!data.pointB)continue;
+    if(checks>=budget)return {type:data.type,classification:'seam',confidence:'unchecked',classificationConfidence:'unchecked',hint:'classification budget exhausted',classificationChecks:checks,classificationBudgetExceeded:true};
+    checks++;
+    if(!part.supported)continue;
+    const interval=segmentPartInterval(data.pointA,data.pointB,part,0);
+    if(!interval||interval[1]-interval[0]<=1e-6||interval[0]>=1-1e-6||interval[1]<=1e-6)continue;
+    const coverage=blockerCoverage(part,data);
+    if(coverage>=.98)return {type:'clearance',classification:'intervening-geometry',reason:'intervening geometry covers the seam region',intervening:[part.ref],classificationConfidence:'proven',classificationChecks:checks,interveningCoverage:coverage};
+    hint??={reason:'partial intervening geometry'};
+  }
+  return {type:data.type,classification:'seam',...(hint?{confidence:'hint',hint:hint.reason,classificationConfidence:'hint'}:{}),classificationChecks:checks};
+}
+function issueScore(severity,classification,gap=0) {
+  const severityScore=severity==='error'?2:1,kindScore=classification==='seam'?2:classification==='intentional-clearance'?0:1;
+  return severityScore*1_000_000+kindScore*100_000+Math.min(10_000,Math.max(0,gap))*100+1;
+}
 function makeIssue(a,b,data,connection) {
-  const ref=data.type==='clearance'?'Clearance':'Gap';
-  const issue={id:fingerprint(a,b,connection??data.type),severity:connection?'error':'warning',...data,a:a.ref,b:b.ref,
-    message:`${ref} ${data.gap.toFixed(3)} studs: ${a.raw.name??a.raw.id??a.ref.partIndex} → ${b.raw.name??b.raw.id??b.ref.partIndex}${connection?' (authored joint)':' (suspected seam)'}`};
-  if(data.type!=='clearance'&&!b.locked&&data.gap<=.6&&data.confidence==='measured') {
+  const severity=connection?'error':'warning',classification=data.classification??(connection?.type==='clearance'?'intentional-clearance':connection?'authored-joint':'seam');
+  const ref=data.type==='clearance'?'Clearance':'Gap',suffix=connection?'authored joint':classification==='seam'?'suspected seam':classification;
+  const issue={id:fingerprint(a,b,connection??data.type),severity,score:issueScore(severity,classification,data.gap),...data,classification,a:a.ref,b:b.ref,
+    message:`${ref} ${data.gap.toFixed(3)} studs: ${a.raw.name??a.raw.id??a.ref.partIndex} → ${b.raw.name??b.raw.id??b.ref.partIndex} (${suffix})`};
+  if(data.type!=='clearance'&&(classification==='seam'||connection)&&!b.locked&&data.gap<=.6&&data.confidence==='measured') {
     const delta=sub(data.pointA,data.pointB);
     issue.fix={index:b.ref.opIndex,partIndex:b.ref.partIndex,patch:{...b.raw,pos:add(b.raw.pos??ZERO,delta)}};
   }
   return issue;
 }
 export function scanStageIssues(ops,options={}) {
-  const tolerance=options.tolerance??.02,maxGap=options.maxGap??.6,maxIssues=options.maxIssues??100,maxPairs=options.maxPairs??250000;
-  if(!Array.isArray(ops)||![tolerance,maxGap,maxIssues,maxPairs].every(Number.isFinite)||tolerance<0||maxGap<=tolerance||maxIssues<1||maxPairs<1)throw new Error('Invalid seam scan options');
+  const tolerance=options.tolerance??.02,maxGap=options.maxGap??.6,maxIssues=options.maxIssues??100,maxPairs=options.maxPairs??250000,maxClassificationChecks=options.maxClassificationChecks??Math.max(1,Math.min(maxPairs,maxIssues*32));
+  if(!Array.isArray(ops)||![tolerance,maxGap,maxIssues,maxPairs,maxClassificationChecks].every(Number.isFinite)||tolerance<0||maxGap<=tolerance||maxIssues<1||maxPairs<1||maxClassificationChecks<1)throw new Error('Invalid seam scan options');
   const {parts,byOp,unsupported}=flatten(ops),all=[],explicitPairs=new Set(),globalIds=new Map();
   for(const p of parts)if(p.raw.id)globalIds.set(p.raw.id,globalIds.has(p.raw.id)?null:p);
   const pairKey=(a,b)=>[`${a.ref.opIndex}:${a.ref.partIndex}`,`${b.ref.opIndex}:${b.ref.partIndex}`].sort().join('|');
@@ -115,14 +223,14 @@ export function scanStageIssues(ops,options={}) {
   for(const {rule,opIndex} of rules) {
       const a=resolve(opIndex,rule.a?.part),b=resolve(opIndex,rule.b?.part);
       if(!a||!b||!vec(rule.a?.point)||!vec(rule.b?.point)) {
-        all.push({id:`invalid:${opIndex}:${rule.id}`,type:'invalid-connection',severity:'error',confidence:'unchecked',message:`Connection ${rule.id}: missing or ambiguous part / invalid endpoint`,a:{opIndex,partIndex:-1}});continue;
+        all.push({id:`invalid:${opIndex}:${rule.id}`,type:'invalid-connection',classification:'invalid',severity:'error',score:2_000_001,confidence:'unchecked',message:`Connection ${rule.id}: missing or ambiguous part / invalid endpoint`,a:{opIndex,partIndex:-1}});continue;
       }
       authoredChecked++;
       explicitPairs.add(pairKey(a,b));
       const pointA=endpoint(a,rule.a),pointB=endpoint(b,rule.b),gap=len(sub(pointB,pointA));
       const failed=rule.type==='clearance'?(gap<(rule.min??0)||gap>(rule.max??Infinity)):gap>(rule.tolerance??tolerance);
       if(failed) {
-        const issue=makeIssue(a,b,{type:rule.type,gap,pointA,pointB,confidence:'measured'},rule);
+        const issue=makeIssue(a,b,{type:rule.type,gap,pointA,pointB,confidence:'measured',...(rule.type==='clearance'?{classification:'intentional-clearance'}:{classification:'authored-joint'})},rule);
         // A move cannot be called a safe snap if this part participates in other declared joints.
         if(rules.filter(({rule:r,opIndex:i})=>resolve(i,r.a.part)===b||resolve(i,r.b.part)===b).length>1)delete issue.fix;
         all.push(issue);
@@ -131,18 +239,23 @@ export function scanStageIssues(ops,options={}) {
   // ponytail: sweep-and-prune can still be quadratic in dense scenes; stop at maxPairs
   // and report partial coverage. Add spatial subdivision only if this budget is hit often.
   const sorted=parts.filter(p=>p.supported).sort((a,b)=>a.min[0]-b.min[0]);
-  let pairsChecked=0,budgetExceeded=false;
+  let pairsChecked=0,budgetExceeded=false,classificationChecks=0,classificationBudgetExceeded=false;
   outer:for(let i=0;i<sorted.length;i++)for(let j=i+1;j<sorted.length;j++) {
     const a=sorted[i],b=sorted[j];if(b.min[0]>a.max[0]+maxGap)break;
     if([1,2].some(k=>a.min[k]>b.max[k]+maxGap||b.min[k]>a.max[k]+maxGap))continue;
     if(pairsChecked>=maxPairs){budgetExceeded=true;break outer;}pairsChecked++;
     if(explicitPairs.has(pairKey(a,b)))continue;
     const seam=a.shape==='box'&&b.shape==='box'?faceGap(a,b,tolerance,maxGap):a.shape==='cylinder'&&b.shape==='cylinder'?cylinderGap(a,b,tolerance,maxGap):null;
-    if(seam)all.push(makeIssue(a,b,seam));
+    if(seam) {
+      const classification=classifyGap(a,b,seam,parts,tolerance,maxClassificationChecks-classificationChecks);
+      classificationChecks+=classification.classificationChecks??0;
+      classificationBudgetExceeded ||= !!classification.classificationBudgetExceeded;
+      all.push(makeIssue(a,b,{...seam,...classification}));
+    }
   }
-  all.sort((a,b)=>(a.severity==='error'?0:1)-(b.severity==='error'?0:1)||(b.gap??0)-(a.gap??0));
+  all.sort((a,b)=>(b.score??0)-(a.score??0)||(a.id<b.id?-1:a.id>b.id?1:0));
   return {issues:all.slice(0,maxIssues),counts:{total:all.length,shown:Math.min(all.length,maxIssues),errors:all.filter(i=>i.severity==='error').length,warnings:all.filter(i=>i.severity==='warning').length},
-    coverage:{status:unsupported.length||budgetExceeded?'partial':'complete',scope:'parallel box faces, parallel cylinder endcaps, and authored endpoints only',parts:parts.length,unsupportedParts:unsupported.length,unsupported:unsupported.slice(0,25),pairsChecked,authoredChecked,budgetExceeded,resultsTruncated:all.length>maxIssues,unchecked:'Curved sides, mixed primitive contacts, arbitrary mesh/CSG surfaces, and undeclared openings are not certified.'}};
+    coverage:{status:unsupported.length||budgetExceeded||classificationBudgetExceeded?'partial':'complete',scope:'parallel box faces, parallel cylinder endcaps, and authored endpoints only',parts:parts.length,unsupportedParts:unsupported.length,unsupported:unsupported.slice(0,25),pairsChecked,authoredChecked,budgetExceeded,classificationChecks,classificationBudget:maxClassificationChecks,classificationBudgetExceeded,resultsTruncated:all.length>maxIssues,unchecked:'Curved sides, mixed primitive contacts, arbitrary mesh/CSG surfaces, and undeclared openings are not certified.'}};
 }
 
 // Exact matrix comparison avoids Euler-order and rounded scene-dump ambiguity.
@@ -154,13 +267,13 @@ export function compareStageGeometry(ops,dump,tolerance=.001) {
   const names=count(parts,p=>p.raw.name),ids=count(parts,p=>p.raw.id),actualNames=count(actual,p=>p.name),actualIds=count(actual,p=>p.buildkitId);
   const issues=[],matched=new Set();let checked=0,unchecked=unsupported.length;
   for(const p of parts) {
-    if(!p.supported)continue;
     const id=p.raw.id,name=p.raw.name;
     const hasId=id&&actualIds.has(id);
     const q=hasId?(ids.get(id)===1&&actualIds.get(id)===1?actual.find(a=>a.buildkitId===id):null)
       :names.get(name)===1&&actualNames.get(name)===1?actual.find(a=>a.name===name):null;
-    if(!q){issues.push({type:'missing-or-ambiguous',a:p.ref,name,id});continue;}
+    if(!q){if(p.supported)issues.push({type:'missing-or-ambiguous',a:p.ref,name,id});continue;}
     matched.add(q);
+    if(!p.supported)continue;
     if(!Array.isArray(q.cframe)||q.cframe.length!==12||!q.cframe.every(Number.isFinite)||!vec(q.exactSize)) {
       unchecked++;issues.push({type:'imprecise-readback',a:p.ref,name});continue;
     }

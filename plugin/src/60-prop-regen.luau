@@ -39,14 +39,101 @@ local function getParts()
 	local ok, d = pcall(function() return Http:JSONDecode(j) end)
 	return (ok and type(d) == "table") and d or {}
 end
+local function isGenerated(instance)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	local managed = model:GetAttribute("BuildKitOwned") == true and type(buildId) == "string"
+	if managed then
+		return instance:GetAttribute("BuildKitOwned") == true
+			and instance:GetAttribute("BuildKitBuildId") == buildId
+	end
+	local foreignOwned = instance:GetAttribute("BuildKitOwned") == true or instance:GetAttribute("BuildKitBuildId") ~= nil
+	local genericGenerated = not managed and model:GetAttribute("BuildKitOwned") == nil and buildId == nil
+	return genericGenerated and not foreignOwned and instance:GetAttribute("BuildKitGenerated") == true
+end
+local function assertGeneratedSubtree(instance)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if not isGenerated(descendant) then
+			error("BuildKit regen refuses a mixed generated/unowned subtree: " .. descendant:GetFullName())
+		end
+	end
+end
+local function clearGenerated()
+	local generated = false
+	local hasGeometry = false
+	for _, child in ipairs(model:GetChildren()) do
+		if child ~= script and isGenerated(child) then
+			generated = true
+			assertGeneratedSubtree(child)
+		else
+			for _, descendant in ipairs(child:GetDescendants()) do
+				if descendant:IsA("BasePart") then hasGeometry = true end
+				if isGenerated(descendant) then
+					error("BuildKit regen found generated content nested under an unowned child: " .. descendant:GetFullName())
+				end
+			end
+		end
+	end
+	if not generated then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") then hasGeometry = true break end
+		end
+		if hasGeometry then
+			error("BuildKit regen cannot identify legacy geometry safely; rebuild this model with the current plugin first")
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if child ~= script and isGenerated(child) then child:Destroy() end
+	end
+end
+local function markGenerated(instance)
+	instance:SetAttribute("BuildKitGenerated", true)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+		instance:SetAttribute("BuildKitBuildId", buildId)
+		instance:SetAttribute("BuildKitOwned", true)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+		if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+			descendant:SetAttribute("BuildKitBuildId", buildId)
+			descendant:SetAttribute("BuildKitOwned", true)
+		end
+	end
+end
 local building = false
 local function build()
 	if building then return end
 	building = true
+	local ok, result = pcall(function()
 	local scale = tonumber(model:GetAttribute("Scale")) or 1
-	local c = model:GetPivot().Position
-	for _, ch in ipairs(model:GetChildren()) do if ch:IsA("BasePart") then ch:Destroy() end end
-	for _, ps in ipairs(getParts()) do
+	local parts = getParts()
+	local currentPivot = model:GetPivot()
+	local pivotOffset = model:GetAttribute("BuildKitRegenPivotOffset")
+	local root
+	if typeof(pivotOffset) ~= "CFrame" then
+		local rawSpec = model:GetAttribute("BuildKitSpec")
+		local okSpec, savedSpec = pcall(function() return Http:JSONDecode(rawSpec or "") end)
+		local center = okSpec and type(savedSpec) == "table" and savedSpec.center
+		if type(center) == "table" and #center == 3 then
+			root = CFrame.new(center[1], center[2], center[3])
+			local first = parts[1] or {}
+			local pos, rot = first.pos or { 0, 0, 0 }, first.rot
+			local firstPivot = CFrame.new(center[1] + pos[1], center[2] + pos[2], center[3] + pos[3])
+			if type(rot) == "table" then firstPivot = firstPivot * CFrame.Angles(math.rad(rot[1]), math.rad(rot[2]), math.rad(rot[3])) end
+			pivotOffset = root:ToObjectSpace(firstPivot)
+			root = currentPivot * pivotOffset:Inverse()
+		else
+			root = CFrame.new(currentPivot.Position)
+			pivotOffset = CFrame.new()
+		end
+	else
+		root = currentPivot * pivotOffset:Inverse()
+	end
+	local c = root.Position
+	local rootRotation = root * CFrame.new(-root.Position)
+	clearGenerated()
+	local firstPart
+	for _, ps in ipairs(parts) do
 		local sz, pos = ps.size or { 1, 1, 1 }, ps.pos or { 0, 0, 0 }
 		local p
 		if tostring(ps.shape):lower() == "wedge" then
@@ -69,14 +156,21 @@ local function build()
 		if ps.op then p:SetAttribute("__op", tostring(ps.op)) end
 		if ps.negate then p:SetAttribute("__negate", true) end
 		p.Parent = model
+		if not firstPart then firstPart = p end
 		if ps.fx then fx(p, ps.fx) end
 		if ps.light then
 			local l = Instance.new("PointLight"); l.Color = col(ps.light.color, p.Color)
 			l.Brightness = ps.light.brightness or 1; l.Range = ps.light.range or 8; l.Parent = p
 		end
+		markGenerated(p)
+		p.CFrame = rootRotation * p.CFrame
 	end
-	if not model.PrimaryPart then model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart") end
+	if firstPart then model.PrimaryPart = firstPart end
+	pivotOffset = root:ToObjectSpace(model:GetPivot())
+	model:SetAttribute("BuildKitRegenPivotOffset", pivotOffset)
+	end)
 	building = false
+	if not ok then error(result) end
 end
 local hasGeom = false
 for _, ch in ipairs(model:GetChildren()) do if ch:IsA("BasePart") then hasGeom = true break end end

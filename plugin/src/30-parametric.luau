@@ -16,6 +16,14 @@ local PARAMETRIC_KINDS = {
 	fridge = true, stove = true, toilet = true, bathtub = true, prop = true,
 }
 local _watched, _pending, _regenBusy = {}, {}, {}
+local REGEN_ATTRIBUTES = { Scale = true, Width = true, Height = true, Depth = true, Color = true }
+
+local function markGenerated(instance)
+	instance:SetAttribute("BuildKitGenerated", true)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+	end
+end
 
 local function tagBuildKit(model, spec)
 	if not (model and spec and PARAMETRIC_KINDS[spec.kind]) then return end
@@ -33,6 +41,12 @@ local function tagBuildKit(model, spec)
 	if spec.color then
 		model:SetAttribute("Color", Color3.fromRGB(spec.color[1], spec.color[2], spec.color[3]))
 	end
+	for _, child in ipairs(model:GetChildren()) do
+		markGenerated(child)
+	end
+	local center = spec.center or { 0, 0, 0 }
+	local root = CFrame.new(center[1], center[2], center[3])
+	model:SetAttribute("BuildKitRegenPivotOffset", root:ToObjectSpace(model:GetPivot()))
 end
 
 local function watchBuildKit(model)
@@ -40,7 +54,7 @@ local function watchBuildKit(model)
 	_watched[model] = true
 	model.AttributeChanged:Connect(function(attr)
 		-- ignore internal tags + ignore changes made BY a regen
-		if attr == "BuildKitKind" or attr == "BuildKitSpec" or _regenBusy[model] or _pending[model] then return end
+		if not REGEN_ATTRIBUTES[attr] or _regenBusy[model] or _pending[model] then return end
 		_pending[model] = true
 		task.defer(function() -- debounce so multi-attribute edits batch into one rebuild
 			_pending[model] = nil

@@ -21,16 +21,23 @@ import { GeneratorWatcher } from "./generators.js";
 import { StageState, type StageOp } from "./stage-state.js";
 import { StageSessionRegistry, stageSessionId } from "./stage-sessions.js";
 import { StageHistory, type StageEditState } from "./stage-history.js";
+import { StageVisibilityStore } from "./stage-visibility.js";
 import { decodeStageArtifact, MAX_STAGE_ITEMS } from "./stage-share.js";
 import { loadAsset, parseAssetId } from "./assets.js";
 import { liveSyncPayload, MAX_SYNC_PARTS, normalizeSyncScope, requireRegionEcho } from "./sync-scope.js";
 import { buildDetachedRestartCommand, findListenerPid, runDetachedRestart } from "./dev-reload.js";
 import { LibraryStore, libraryPreview, validateLibraryPreset, type LibraryEntry } from "./library.js";
 import { StageRenderer } from "./stage-render.js";
+import { verifyStage } from "./stage-verify.js";
+import { prepareStageCommit, STAGE_COMMIT_MODES, validateStageCommitOptions, type StageCommitOptions } from "./stage-commit.js";
+import { applyStageAgentPatch, ChangeLedger, ensureStageIds, type StageAgentPatch, type StageAgentPatchResult } from "./stage-agent-edits.js";
+import { alignSockets, type AssemblySocket, type SocketTransform } from "./stage-sockets.js";
+import { applyStageConnection, previewStageConnection, type StageConnectionRequest } from "./stage-connect.js";
 import { normalizeStageConnections } from "./stage-connections.js";
 import { scanStageIssues, compareStageGeometry } from "../viewer/seam-qa.js";
 import { applyStageReparent, parseStageReparentRequest } from "./stage-reparent.js";
 import { overlayMirrorTransforms, type MirrorTransform } from "./mirror-sync.js";
+import { configureMirrorMaxParts, getMirrorOptions, mirrorOptions, parseMirrorMaxParts } from "./mirror-options.js";
 import { writeAtomicFile } from "./atomic-file.js";
 import { diffMapRules, MapWatcher, type MapFileState, type MapPlacementRule } from "./map-workflow.js";
 import {
@@ -120,7 +127,7 @@ const stageInstance = randomUUID();
 const sharedStageTools = new Map<string, { schema: z.ZodType; run: (args: any) => Promise<any> }>();
 const nativeRegisterTool = server.registerTool.bind(server);
 const registerTool = ((name: string, config: any, callback: any) => {
-  const shared = ["rbx_stage_build", "rbx_stage_clear", "rbx_stage_commit", "rbx_stage_status", "rbx_stage_qa", "rbx_stage_render"].includes(name);
+  const shared = ["rbx_stage_build", "rbx_stage_clear", "rbx_stage_commit", "rbx_stage_status", "rbx_stage_inspect", "rbx_stage_patch", "rbx_stage_qa", "rbx_stage_render", "rbx_stage_verify", "rbx_stage_connect", "rbx_socket_align"].includes(name);
   if (shared) sharedStageTools.set(name, { schema: z.object(config.inputSchema), run: callback });
   const handle = nativeRegisterTool(name, config, async (...args: any[]) => {
     if (!shared || !sharedViewer) return callback(...args);
@@ -517,6 +524,7 @@ registerTool(
 // to what rbx_batch would send Studio — no separate translation step to drift out of sync.
 type StagedOp = StageOp;
 const stageSessions = new StageSessionRegistry();
+const stageVisibility = new StageVisibilityStore();
 const libraryStore = new LibraryStore(LIBRARY_DIR);
 const stageRenderer = new StageRenderer({
   viewerUrl: `http://127.0.0.1:${VIEWER_PORT}/stage.html`,
@@ -533,6 +541,7 @@ type StageRuntime = {
   dirty: boolean;
   csgMax: number;
   clients: Set<import("node:http").ServerResponse>;
+  ledger: ChangeLedger;
 };
 
 const stageRuntimes = new Map<string, StageRuntime>();
@@ -568,8 +577,10 @@ function stageRuntime(value?: unknown): StageRuntime {
     dirty: false,
     csgMax: 100,
     clients: new Set(),
+    ledger: new ChangeLedger(50),
   };
-  runtime.state.setGenerations(latestGenerations);
+  runtime.state.setGenerations(stageVisibility.apply(id, latestGenerations));
+  runtime.ledger.record(runtime.revision, stageInstance, runtime.state.getOps());
   stageRuntimes.set(id, runtime);
   return runtime;
 }
@@ -624,6 +635,7 @@ function stageOpStatus(op: StageOp, index: number) {
   return {
     index,
     action: op.action,
+    ...(typeof op.args.id === "string" ? { id: op.args.id } : {}),
     ...(kind ? { kind } : {}),
     ...(name ? { name } : {}),
     renderable: !empty,
@@ -653,6 +665,7 @@ function stageStatusSummary(stage: StageRuntime, detail = false) {
     : null;
   return {
     session: stage.id,
+    instance: stageInstance,
     revision: stage.revision,
     dirty: stage.dirty,
     pending: {
@@ -687,6 +700,145 @@ function stageSnapshot(stage: StageRuntime) {
   return { ...stage.state.snapshot(), session: stage.id, instance: stageInstance, revision: stage.revision };
 }
 
+function identityValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(identityValue);
+  if (!value || typeof value !== "object") return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key !== "id") result[key] = identityValue(item);
+  }
+  return result;
+}
+
+function identityKey(value: unknown): string {
+  return JSON.stringify(identityValue(value));
+}
+
+// Generator source files generally do not carry IDs. Reconcile a refresh with the
+// previous canonical generation by semantic/name or unchanged content before filling
+// genuinely new IDs; never reuse an ID merely because an item moved to the same index.
+function carryStageIds(nextOps: readonly StageOp[], previousOps: readonly StageOp[] = []): StageOp[] {
+  const next = structuredClone(nextOps);
+  const previous = structuredClone(previousOps);
+  const unused = new Set(previous.map((_, index) => index));
+  const uniqueMatch = (value: unknown, candidates: readonly unknown[]) => {
+    const matches = candidates.map((candidate, index) => ({ candidate, index })).filter(({ candidate, index }) => unused.has(index) && identityKey(candidate) === identityKey(value));
+    return matches.length === 1 ? matches[0].index : undefined;
+  };
+  next.forEach((op, opIndex) => {
+    let matchedOpIndex: number | undefined;
+    if (typeof op.args.id !== "string" || op.args.id.trim() === "") {
+      const semantic = typeof op.args.name === "string" && op.args.name.trim()
+        ? previous.map((item) => ({ action: item.action, kind: item.args.kind, name: item.args.name, parent: item.args.parent }))
+        : [];
+      let match = semantic.length
+        ? semantic.map((item, index) => ({ item, index })).filter(({ item, index }) => unused.has(index) && identityKey(item) === identityKey({ action: op.action, kind: op.args.kind, name: op.args.name, parent: op.args.parent }))
+        : [];
+      matchedOpIndex = match.length === 1 ? match[0].index : uniqueMatch(op, previous);
+      if (matchedOpIndex !== undefined) {
+        op.args.id = previous[matchedOpIndex].args.id;
+        unused.delete(matchedOpIndex);
+      }
+    } else {
+      const existing = previous.findIndex((item) => item.args.id === op.args.id);
+      if (existing >= 0) {
+        matchedOpIndex = existing;
+        unused.delete(existing);
+      }
+    }
+    const oldOp = matchedOpIndex === undefined ? undefined : previous[matchedOpIndex];
+    if (!Array.isArray(op.args.parts) || !Array.isArray(oldOp?.args.parts)) return;
+    const oldParts = oldOp.args.parts as unknown[];
+    const oldUnused = new Set(oldParts.map((_, index) => index));
+    for (const rawPart of (op.args.parts as unknown[])) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) continue;
+      const part = rawPart as Record<string, unknown>;
+      if (typeof part.id === "string" && part.id.trim() !== "") {
+        const existing = oldParts.findIndex((old) => old && typeof old === "object" && !Array.isArray(old) && (old as Record<string, unknown>).id === part.id);
+        if (existing >= 0) oldUnused.delete(existing);
+        continue;
+      }
+      const named = typeof part.name === "string" && part.name.trim()
+        ? oldParts.map((old) => (old && typeof old === "object" && !Array.isArray(old) ? { name: (old as Record<string, unknown>).name } : {}))
+        : [];
+      const matches = named.length
+        ? named.map((item, index) => ({ item, index })).filter(({ item, index }) => oldUnused.has(index) && identityKey(item) === identityKey({ name: part.name }))
+        : oldParts.map((old, index) => ({ old, index })).filter(({ old, index }) => oldUnused.has(index) && identityKey(old) === identityKey(part));
+      const matched = matches.length === 1 ? matches[0].index : undefined;
+      if (matched !== undefined) {
+        const old = oldParts[matched] as Record<string, unknown>;
+        if (typeof old.id === "string" && old.id.trim() !== "") part.id = old.id;
+        oldUnused.delete(matched);
+      }
+    }
+  });
+  return ensureStageIds(next);
+}
+
+function stageRefIds(ops: readonly StageOp[]): Set<string> {
+  const ids = new Set<string>();
+  for (const op of ops) {
+    if (typeof op.args.id === "string") ids.add(op.args.id);
+    if (Array.isArray(op.args.parts)) for (const part of op.args.parts) {
+      if (part && typeof part === "object" && !Array.isArray(part) && typeof (part as Record<string, unknown>).id === "string") ids.add((part as Record<string, unknown>).id as string);
+    }
+  }
+  return ids;
+}
+
+function remapStageIdCollisions(ops: readonly StageOp[], reserved: Set<string>): StageOp[] {
+  const next = structuredClone(ops);
+  const used = new Set(reserved);
+  const remapped = new Map<string, string>();
+  const take = (owner: Record<string, unknown>) => {
+    if (typeof owner.id !== "string" || owner.id.trim() === "") return;
+    if (used.has(owner.id)) {
+      const oldId = owner.id;
+      let replacement = randomUUID();
+      while (used.has(replacement)) replacement = randomUUID();
+      owner.id = replacement;
+      used.add(replacement);
+      remapped.set(oldId, replacement);
+      return;
+    }
+    used.add(owner.id);
+  };
+  for (const op of next) {
+    take(op.args);
+    if (Array.isArray(op.args.parts)) for (const part of op.args.parts) {
+      if (part && typeof part === "object" && !Array.isArray(part)) take(part as Record<string, unknown>);
+    }
+  }
+  if (remapped.size) {
+    const owners = next.flatMap((op) => [op.args, ...(Array.isArray(op.args.parts) ? op.args.parts : [])]);
+    for (const owner of owners) {
+      if (!owner || typeof owner !== "object" || Array.isArray(owner)) continue;
+      const connections = (owner as Record<string, unknown>).connections;
+      if (!Array.isArray(connections)) continue;
+      for (const rule of connections) {
+        if (!rule || typeof rule !== "object" || Array.isArray(rule)) continue;
+        for (const side of ["a", "b"]) {
+          const endpoint = (rule as Record<string, unknown>)[side];
+          if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) continue;
+          const id = (endpoint as Record<string, unknown>).part;
+          const replacement = typeof id === "string" ? remapped.get(id) : undefined;
+          if (replacement) (endpoint as Record<string, unknown>).part = replacement;
+        }
+      }
+    }
+  }
+  return ensureStageIds(next);
+}
+
+function appendManualStageOps(stage: StageRuntime, incoming: readonly StageOp[]): StageOp[] {
+  const copied = remapStageIdCollisions(incoming, stageRefIds(stage.state.getOps()));
+  return [...stage.manualOps, ...copied];
+}
+
+function stageItemCount(ops: readonly StageOp[]): number {
+  return ops.length + ops.reduce((total, op) => total + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0);
+}
+
 function captureStageEdit(stage: StageRuntime): StageEditState {
   const enabled: Record<string, boolean> = {};
   for (const generation of stage.state.snapshot().generations) enabled[generation.name] = generation.enabled;
@@ -694,7 +846,7 @@ function captureStageEdit(stage: StageRuntime): StageEditState {
 }
 
 function setManualStage(stage: StageRuntime, ops: StageOp[]) {
-  stage.manualOps = structuredClone(normalizeStageConnections(ops));
+  stage.manualOps = structuredClone(ensureStageIds(normalizeStageConnections(ops)));
   stage.state.clearManual();
   stage.state.appendManual(stage.manualOps);
 }
@@ -707,11 +859,17 @@ function restoreStageEdit(stage: StageRuntime, state: StageEditState) {
   }
 }
 
-function mutateStage(stage: StageRuntime, change: () => void, label = "Stage edit"): boolean {
+function mutateStage(stage: StageRuntime, change: () => void, label = "Stage edit", recordHistory = true): boolean {
   const before = captureStageEdit(stage);
-  change();
-  const after = captureStageEdit(stage);
-  return stage.history.record(before, after, label);
+  try {
+    change();
+    const after = captureStageEdit(stage);
+    stageVisibility.commit(stage.id, after.enabled);
+    return recordHistory ? stage.history.record(before, after, label) : JSON.stringify(before) !== JSON.stringify(after);
+  } catch (error) {
+    restoreStageEdit(stage, before);
+    throw error;
+  }
 }
 
 function parseStageOps(value: unknown): StageOp[] {
@@ -725,7 +883,69 @@ function parseStageOps(value: unknown): StageOp[] {
   });
   const parts = raw.reduce((total, op) => total + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0);
   if (raw.length + parts > MAX_STAGE_ITEMS) throw new Error(`stage ops exceed the ${MAX_STAGE_ITEMS}-item cap`);
-  return normalizeStageConnections(validateBatchOps(raw).map((op) => ({ action: op.action, args: { ...(op.args as Record<string, unknown>) } })));
+  return ensureStageIds(normalizeStageConnections(validateBatchOps(raw).map((op) => ({ action: op.action, args: { ...(op.args as Record<string, unknown>) } }))));
+}
+
+function applyStageAgentResult(stage: StageRuntime, result: StageAgentPatchResult, label = "Stage agent patch"): boolean {
+  const snapshot = stage.state.snapshot();
+  const visibleOwners: (string | null)[] = [];
+  const generationOps = new Map<string, StageOp[]>();
+  for (const generation of snapshot.generations) {
+    if (!generation.enabled) continue;
+    const ops = parseStageOps(generation.ops);
+    generationOps.set(generation.name, ops);
+    for (const _op of ops) visibleOwners.push(generation.name);
+  }
+  for (const _op of snapshot.ops.slice(visibleOwners.length)) visibleOwners.push(null);
+  const promotedOwners = new Set<string>();
+  for (const index of result.affectedIndices) {
+    const owner = visibleOwners[index];
+    if (owner !== null && owner !== undefined) promotedOwners.add(owner);
+  }
+  const nextById = new Map<string, StageOp>();
+  for (const op of result.ops) if (typeof op.args.id === "string") nextById.set(op.args.id, op);
+  const currentManual = snapshot.ops.slice(visibleOwners.filter((owner) => owner !== null).length);
+  const promoted: StageOp[] = [];
+  for (const [name, ops] of generationOps) {
+    if (!promotedOwners.has(name)) continue;
+    for (const op of ops) {
+      const id = op.args.id;
+      if (typeof id === "string") {
+        const next = nextById.get(id);
+        if (next) promoted.push(next);
+      }
+    }
+  }
+  const nextManual = [...promoted];
+  for (const op of currentManual) {
+    const id = op.args.id;
+    if (typeof id === "string") {
+      const next = nextById.get(id);
+      if (next) nextManual.push(next);
+    }
+  }
+  return mutateStage(stage, () => {
+    for (const owner of promotedOwners) stage.state.setGenerationEnabled(owner, false);
+    setManualStage(stage, nextManual);
+  }, label);
+}
+
+function applyStageAgentRequest(stage: StageRuntime, request: {
+  expectedRevision: number;
+  expectedInstance: string;
+  patches: StageAgentPatch[];
+}, label = "Stage agent patch", details = false) {
+  const result = applyStageAgentPatch(stage.state.getOps(), request, { revision: stage.revision, instance: stageInstance });
+  const changed = applyStageAgentResult(stage, result, label);
+  if (changed) broadcastStage(stage);
+  return {
+    changedIds: result.changedIds,
+    affectedOpIndices: result.affectedIndices,
+    revision: stage.revision,
+    instance: stageInstance,
+    changed,
+    ...(details ? { ops: result.ops } : {}),
+  };
 }
 
 // Stage-wide CSG part budget, settable from the viewer. An op that names its own csgMax
@@ -739,14 +959,14 @@ function applyCsgMax(stage: StageRuntime, ops: StageOp[]): StageOp[] {
   });
 }
 
-async function commitStage(stage: StageRuntime, origin: "user" | "ai"): Promise<unknown> {
+async function commitStage(stage: StageRuntime, origin: "user" | "ai", options: StageCommitOptions): Promise<unknown> {
   const ops = applyCsgMax(stage, stage.state.getOps());
-  if (ops.length === 0) throw new Error("nothing staged — add a generator file or call rbx_stage_build first");
+  const request = prepareStageCommit(ops, options);
   const commitRevision = stage.revision;
-  const result = await bridge.sendCommand("batch", { ops }, 120_000);
+  const result = await bridge.sendCommand("stage_commit", request, 120_000);
   const recent = await saveRecentGeneration(`stage-${new Date().toISOString().replace(/[:.]/g, "-")}`, ops, origin);
   if (stage.revision === commitRevision) stage.dirty = false;
-  return { result, recent };
+  return { result, recent, mode: request.mode, buildId: request.buildId };
 }
 
 async function saveRecentGeneration(name: string, ops: StageOp[], origin: "user" | "ai") {
@@ -773,6 +993,7 @@ function liveBroadcast(event: string, data: unknown) {
 }
 function broadcastStage(stage: StageRuntime) {
   stage.revision += 1;
+  stage.ledger.record(stage.revision, stageInstance, stage.state.getOps());
   if (stageReady) stage.dirty = true;
   const send = (event: string, data: unknown) => {
     const chunk = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -787,9 +1008,12 @@ function broadcastStage(stage: StageRuntime) {
 
 const generatorWatcher = new GeneratorWatcher(GENERATORS_DIR, {
   onChange: (states) => {
-    latestGenerations = states;
+    latestGenerations = states.map((generation) => {
+      const previous = latestGenerations.find((item) => item.name === generation.name);
+      return { ...generation, ops: carryStageIds(generation.ops, previous?.ops) };
+    });
     for (const stage of stageRuntimes.values()) {
-      stage.state.setGenerations(states);
+      stage.state.setGenerations(stageVisibility.apply(stage.id, latestGenerations));
       broadcastStage(stage);
     }
   },
@@ -1088,7 +1312,7 @@ registerTool(
       target: z.string().min(1).optional().describe("Actual scene target; omit for Workspace."),
       referenceTarget: z.string().min(1).optional().describe("Live reference target for check mode; mutually exclusive with profile."),
       profile: z.string().min(1).optional().describe("Safe repo-local profile name, without .json."),
-      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts read per snapshot (cap 800)."),
+      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts read per snapshot (cap 20000; default 800)."),
       tolerance: CONFORMANCE_TOLERANCE.optional().describe("One non-negative tolerance, or per-metric tolerances."),
     },
   },
@@ -1128,8 +1352,25 @@ registerTool(
 
 function libraryEntrySummary(entry: LibraryEntry) {
   const { ops, preview, ...metadata } = entry;
-  return { ...metadata, opCount: ops.length, partCount: ops.reduce((n, op) => n + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0), hasPreview: !!preview };
+  return {
+    ...metadata,
+    opCount: ops.length,
+    partCount: ops.reduce((n, op) => n + (Array.isArray(op.args.parts) ? op.args.parts.length : 0), 0),
+    hasPreview: !!preview,
+    socketCount: entry.sockets?.length ?? 0,
+    ...(entry.sockets?.length ? { socketNames: entry.sockets.slice(0, 50).map((socket) => socket.name), ...(entry.sockets.length > 50 ? { socketNamesTruncated: true } : {}) } : {}),
+  };
 }
+
+const stageSocketSchema = z.object({
+  name: z.string().min(1).max(64),
+  pos: z.array(z.number().finite()).length(3),
+  rot: z.array(z.number().finite()).length(3),
+});
+const stageSocketTransformSchema = z.object({
+  position: z.array(z.number().finite()).length(3),
+  rotation: z.array(z.number().finite()).length(3),
+});
 
 registerTool(
   "rbx_library_save",
@@ -1139,6 +1380,11 @@ registerTool(
     inputSchema: {
       name: z.string().min(1),
       ops: z.array(z.object({ action: z.enum(["build", "edit"]), args: z.object({}).passthrough() })),
+      sockets: z.array(z.object({
+        name: z.string().min(1).max(64),
+        pos: z.array(z.number().finite()).length(3),
+        rot: z.array(z.number().finite()).length(3),
+      })).max(50).optional().describe("Optional named assembly sockets; explicit [] clears sockets when updating a preset."),
       category: z.string().min(1).optional(),
       detail: z.boolean().optional().describe("Include full saved ops and preview; default false."),
     },
@@ -1147,7 +1393,7 @@ registerTool(
     try {
       const ops = parseStageOps(args.ops);
       const preview = libraryPreview(ops);
-      const entry = await libraryStore.save({ name: args.name, ops, preview: preview ? JSON.stringify(preview) : undefined, origin: "ai", kind: "saved", category: args.category ?? null });
+      const entry = await libraryStore.save({ name: args.name, ops, sockets: args.sockets, preview: preview ? JSON.stringify(preview) : undefined, origin: "ai", kind: "saved", category: args.category ?? null });
       return textResult(args.detail ? entry : libraryEntrySummary(entry));
     } catch (error) {
       return errResult(error);
@@ -1195,6 +1441,80 @@ registerTool(
 );
 
 registerTool(
+  "rbx_socket_align",
+  {
+    title: "Calculate assembly socket alignment",
+    description: "Read-only socket transform calculator. Aligns one named source socket to a target socket and returns compact root delta/residual data; it never mutates Stage, Studio, or library state.",
+    inputSchema: {
+      source: stageSocketSchema,
+      target: stageSocketSchema,
+      sourceRoot: stageSocketTransformSchema.optional(),
+      targetRoot: stageSocketTransformSchema.optional(),
+      opposite: z.boolean().optional().describe("Reverse the target-local frame while preserving Y/up."),
+    },
+  },
+  async (args) => {
+    try {
+      return textResult(alignSockets(args.source as AssemblySocket, args.target as AssemblySocket, {
+        sourceRoot: args.sourceRoot as SocketTransform | undefined,
+        targetRoot: args.targetRoot as SocketTransform | undefined,
+        opposite: args.opposite,
+      }));
+    } catch (error) {
+      return errResult(error);
+    }
+  },
+);
+
+registerTool(
+  "rbx_stage_connect",
+  {
+    title: "Preview or apply a stable-ID Stage connection",
+    description: "Preview or apply a seat, join, or align intent between canonical Stage part IDs. Apply requires expectedRevision and recomputes the plan from the current server Stage; client-supplied plan/actions are not accepted. Preview is read-only; apply records one undo entry and broadcasts once.",
+    inputSchema: {
+      session: z.string().optional().describe("Independent stage session id. Default 'default'."),
+      action: z.enum(["preview", "apply"]).optional().describe("preview is read-only; apply requires expectedRevision."),
+      intent: z.enum(["seat", "join", "align"]),
+      source: z.string().min(1).max(256).describe("Stable source part id from rbx_stage_inspect; names and numeric indices are not accepted."),
+      target: z.string().min(1).max(256).describe("Stable target part id from rbx_stage_inspect; names and numeric indices are not accepted."),
+      expectedRevision: z.number().int().nonnegative().optional().describe("Required for apply; must be the current Stage revision."),
+      tolerance: z.number().min(0).max(100).optional(),
+    },
+  },
+  async (a) => {
+    try {
+      const stage = stageRuntime(a.session);
+      const ops = structuredClone(stage.state.getOps());
+      const revision = stage.revision;
+      const refs = stageRefIds(ops);
+      if (!refs.has(a.source)) throw new Error(`stable source ref not found: ${a.source}`);
+      if (!refs.has(a.target)) throw new Error(`stable target ref not found: ${a.target}`);
+      const request: StageConnectionRequest = {
+        intent: a.intent,
+        source: a.source,
+        target: a.target,
+        ...(a.expectedRevision === undefined ? {} : { expectedRevision: a.expectedRevision }),
+        ...(a.tolerance === undefined ? {} : { tolerance: a.tolerance }),
+      };
+      const plan = previewStageConnection({ ops, revision }, request);
+      if ((a.action ?? "preview") !== "apply") return textResult(plan);
+      if (a.expectedRevision === undefined) throw new Error("expectedRevision is required for Stage connection apply");
+      const applied = applyStageConnection({ ops, revision }, plan, a.expectedRevision);
+      if (!applied.ok || !applied.ops) {
+        return textResult({ ok: false, code: applied.code, revision: applied.revision, expectedRevision: applied.expectedRevision, residual: applied.residual, findings: applied.findings });
+      }
+      const changedIds = [...new Set(plan.actions.map((action) => action.targetId).filter((id): id is string => typeof id === "string"))];
+      const affectedIndices = [...new Set(plan.actions.map((action) => action.index))].sort((left, right) => left - right);
+      const changed = applyStageAgentResult(stage, { ok: true, ops: applied.ops, changedIds, affectedIndices }, "Stage connection");
+      if (changed) broadcastStage(stage);
+      return textResult({ ok: true, action: "apply", intent: a.intent, source: a.source, target: a.target, changed, changedIds, affectedOpIndices: affectedIndices, revision: stage.revision, expectedRevision: a.expectedRevision, residual: applied.residual, findings: applied.findings });
+    } catch (error) {
+      return errResult(error);
+    }
+  },
+);
+
+registerTool(
   "rbx_stage_build",
   {
       title: "Stage build ops in the live three.js preview (no Studio round-trip)",
@@ -1214,7 +1534,7 @@ registerTool(
     try {
       const stage = stageRuntime(a.session);
       const validated = parseStageOps(a.ops);
-      mutateStage(stage, () => setManualStage(stage, [...stage.manualOps, ...validated]), "Stage build");
+      mutateStage(stage, () => setManualStage(stage, appendManualStageOps(stage, validated)), "Stage build");
       broadcastStage(stage);
       return textResult(`staged ${validated.length} ops (${stage.state.getOps().length} total) at http://localhost:${VIEWER_PORT}/stage.html?session=${encodeURIComponent(stage.id)}`);
     } catch (e) {
@@ -1243,16 +1563,23 @@ registerTool(
   {
     title: "Commit the staged build into real Studio",
     description:
-      "Sends every enabled generator op plus manual staged ops into Studio as one atomic batch (identical to calling rbx_batch with the same ops) — " +
-      "the exact same 'batch' bridge call rbx_batch makes, so what you saw staged is what gets built. Studio must be connected for this call only (staging itself works offline). Returns compact QA counts/warnings and saved-file metadata by default; detail:true includes full output.",
-    inputSchema: { session: z.string().optional().describe("Independent stage session id. Default 'default'."), detail: z.boolean().optional().describe("Include full commit QA and recent preset ops; default compact counts/warnings.") },
+      "Commits every enabled generator op plus manual staged build ops into one stable Studio-owned root. " +
+      "mode='append' creates a new root and rejects an existing buildId; mode='update-existing' atomically replaces only that buildId root. " +
+      "Studio must be connected for this call only (staging itself works offline). Returns compact QA counts/warnings and saved-file metadata by default; detail:true includes full output.",
+    inputSchema: {
+      session: z.string().optional().describe("Independent stage session id. Default 'default'."),
+      mode: z.enum(STAGE_COMMIT_MODES).describe("append creates a new stable root; update-existing replaces the same buildId root."),
+      buildId: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).describe("Stable managed-root id."),
+      rootName: z.string().min(1).max(100).optional().describe("Optional printable Studio root name; display-only and stable across updates."),
+      detail: z.boolean().optional().describe("Include full commit QA and recent preset ops; default compact counts/warnings."),
+    },
   },
   async (a) => {
     try {
-      const committed = await commitStage(stageRuntime(a.session), "ai") as { result: any; recent: LibraryEntry };
+      const committed = await commitStage(stageRuntime(a.session), "ai", { mode: a.mode, buildId: a.buildId, rootName: a.rootName }) as { result: any; recent: LibraryEntry; mode: string; buildId: string };
       if (a.detail) return textResult(committed);
       const result = committed.result;
-      return textResult({ result: { ...result, results: Array.isArray(result?.results) ? result.results.map(({ qa, ...row }: any) => ({ ...row, ...(qa ? { qa: { counts: qa.counts, coverage: qa.coverage, warnings: qa.warnings } } : {}) })) : result?.results }, recent: libraryEntrySummary(committed.recent) });
+      return textResult({ mode: committed.mode, buildId: committed.buildId, result: { ...result, results: Array.isArray(result?.results) ? result.results.map(({ qa, ...row }: any) => ({ ...row, ...(qa ? { qa: { counts: qa.counts, coverage: qa.coverage, warnings: qa.warnings } } : {}) })) : result?.results }, recent: libraryEntrySummary(committed.recent) });
     } catch (e) {
       return errResult(e);
     }
@@ -1306,13 +1633,107 @@ registerTool(
   {
     title: "Read staged build status",
     description:
-      "Return a compact summary of the browser stage without the full ops payload: revision, renderable/empty build counts, generator enabled/error state, approximate bounds, dirty/pending commit state, and undo/redo availability. Set detail=true for per-op summaries.",
+      "Return a compact summary of the browser stage without the full ops payload: instance epoch, revision, renderable/empty build counts, generator enabled/error state, approximate bounds, dirty/pending commit state, and undo/redo availability. Use the returned instance with stable-ID edits; set detail=true for per-op summaries.",
     inputSchema: {
       session: z.string().optional().describe("Independent stage session id. Default 'default'."),
       detail: z.boolean().optional().describe("Include per-op kind/name/renderability details. Default false."),
     },
   },
   async (a) => textResult(stageStatusSummary(stageRuntime(a.session), a.detail === true)),
+);
+
+registerTool(
+  "rbx_stage_inspect",
+  {
+    title: "Inspect stable Stage IDs and changes",
+    description: "Return a bounded stable-ID inventory for the current Stage revision. Pass sinceRevision plus the instanceEpoch returned by status/inspect to receive added, removed, changed, and QA new/resolved deltas. IDs are canonical Stage identities; revision or instance mismatches fail closed. An opt-in render is focused on an explicit or affected operation and is marked stale if Stage changes while awaiting capture.",
+    inputSchema: {
+      session: z.string().optional().describe("Independent stage session id. Default 'default'."),
+      instanceEpoch: z.string().min(1).optional().describe("Required with sinceRevision; must match the retained Stage instance."),
+      sinceRevision: z.number().int().nonnegative().optional().describe("Earlier retained revision for a bounded change-aware delta."),
+      offset: z.number().int().nonnegative().max(5000).optional().describe("Inventory/delta page offset; default 0."),
+      limit: z.number().int().min(1).max(5000).optional().describe("Inventory/delta page size; default 50."),
+      details: z.boolean().optional().describe("Include bounded operation details; default false."),
+      render: z.object({
+        angles: z.array(z.object({ azimuth: z.number(), elevation: z.number() })).min(1).max(8).optional(),
+        width: z.number().int().min(256).max(1600).optional(),
+        height: z.number().int().min(256).max(1600).optional(),
+        opIndex: z.number().int().nonnegative().optional().describe("Explicit focused Stage operation; otherwise the first affected operation is used."),
+      }).optional().describe("Opt-in focused Stage render; pixels never certify Studio fidelity."),
+    },
+  },
+  async (a) => {
+    try {
+      const stage = stageRuntime(a.session);
+      if (a.sinceRevision !== undefined && !a.instanceEpoch) throw new Error("instanceEpoch is required when sinceRevision is provided");
+      const revision = stage.revision;
+      const inspection: any = stage.ledger.inspect({
+        revision: stage.revision,
+        instance: a.instanceEpoch ?? stageInstance,
+        since: a.sinceRevision,
+        detail: a.details === true,
+        ops: a.details === true ? stage.state.getOps() : undefined,
+        offset: a.offset,
+        limit: a.limit,
+      });
+      const images: any[] = [];
+      if (a.render) {
+        const focusedOpIndex = a.render.opIndex
+          ?? inspection.changed?.[0]?.after?.opIndex
+          ?? inspection.added?.[0]?.opIndex;
+        if (!Number.isInteger(focusedOpIndex) || focusedOpIndex < 0) throw new Error("focused Stage render needs render.opIndex or an affected operation from sinceRevision");
+        const captured = await stageRenderer.render(stage.id, a.render.angles, {
+          width: a.render.width,
+          height: a.render.height,
+          opIndex: focusedOpIndex,
+        });
+        const currentRevision = stage.revision;
+        inspection.render = {
+          count: captured.length,
+          revision,
+          currentRevision,
+          stale: currentRevision !== revision,
+          focusedOpIndex,
+        };
+        images.push(...captured.map((image) => ({ type: "image" as const, data: image.toString("base64"), mimeType: "image/png" })));
+      }
+      if (inspection.render?.stale) inspection.renderNote = `STALE focused Stage render: captured at revision ${inspection.render.revision}, current revision ${inspection.render.currentRevision}; rerun inspection before relying on it.`;
+      return { content: [...images, { type: "text" as const, text: JSON.stringify(inspection, null, 2) }] };
+    } catch (error) {
+      return errResult(error);
+    }
+  },
+);
+
+registerTool(
+  "rbx_stage_patch",
+  {
+    title: "Patch Stage by stable ID",
+    description: "Apply a bounded all-or-nothing stable-ID patch to Stage. Send the current instanceEpoch and expectedRevision from rbx_stage_status/inspect; malformed, ambiguous, locked, stale, or partially invalid batches leave Stage and undo history unchanged. Changes cannot replace action, identity, or parts arrays.",
+    inputSchema: {
+      session: z.string().optional().describe("Independent stage session id. Default 'default'."),
+      instanceEpoch: z.string().min(1).describe("Stage instance epoch returned as instance."),
+      expectedRevision: z.number().int().nonnegative(),
+      patches: z.array(z.object({
+        id: z.string().min(1).max(256),
+        changes: z.object({}).passthrough().optional(),
+        remove: z.boolean().optional(),
+      })).min(1).max(50),
+      details: z.boolean().optional().describe("Include the full patched ops only when explicitly requested."),
+    },
+  },
+  async (a) => {
+    try {
+      const stage = stageRuntime(a.session);
+      return textResult(applyStageAgentRequest(stage, {
+        expectedRevision: a.expectedRevision,
+        expectedInstance: a.instanceEpoch,
+        patches: a.patches,
+      }, "Stage agent patch", a.details === true));
+    } catch (error) {
+      return errResult(error);
+    }
+  },
 );
 
 registerTool(
@@ -1341,6 +1762,64 @@ registerTool(
       };
     } catch (error) {
       return errResult(error);
+    }
+  },
+);
+
+registerTool(
+  "rbx_stage_verify",
+  {
+    title: "Verify staged geometry",
+    description:
+      "Return a bounded Stage verification summary: current Stage errors, seam findings, and explicit QA coverage. " +
+      "Issue details, a focused Stage render, and read-only Studio primitive parity are opt-in. " +
+      "Revision drift during render/readback is stale and never clean. This does not commit or mutate Studio; rendered pixels, materials, lighting, CSG fidelity, meshes, and undeclared openings remain uncertified.",
+    inputSchema: {
+      session: z.string().optional().describe("Independent stage session id. Default 'default'."),
+      details: z.boolean().optional().describe("Include bounded issue and unsupported-surface details. Default false."),
+      render: z.object({
+        angles: z.array(z.object({ azimuth: z.number(), elevation: z.number() })).min(1).max(8).optional(),
+        width: z.number().int().min(256).max(1600).optional(),
+        height: z.number().int().min(256).max(1600).optional(),
+        opIndex: z.number().int().nonnegative().optional().describe("Focus one Stage operation in the render."),
+      }).optional().describe("Opt-in headless Stage render; omit for a text-only verification."),
+      target: z.string().min(1).max(512).optional().describe("Opt-in exact Studio target for read-only primitive transform parity."),
+      tolerance: z.number().min(0).max(100).optional().describe("Studio parity tolerance in studs/normalized matrix units. Default 0.001."),
+    },
+  },
+  async (a) => {
+    try {
+      const stage = stageRuntime(a.session);
+      const snapshot = stage.state.snapshot();
+      const result = await verifyStage({
+        session: stage.id,
+        ops: structuredClone(snapshot.ops),
+        errors: snapshot.errors,
+        details: a.details === true,
+        render: a.render ? {
+          angles: a.render.angles,
+          options: { width: a.render.width, height: a.render.height, opIndex: a.render.opIndex },
+        } : undefined,
+        parity: a.target ? { target: a.target, tolerance: a.tolerance } : undefined,
+      }, {
+        getRevision: () => stage.revision,
+        render: (session, angles, options) => stageRenderer.render(session, angles, options),
+        readback: (target) => bridge.sendCommand("scene_dump", { target, precise: true }, 30_000) as Promise<Parameters<typeof compareStageGeometry>[1]>,
+      });
+      const content: any[] = result.images.map((image) => ({ type: "image" as const, data: image.toString("base64"), mimeType: "image/png" }));
+      const render = result.summary.render;
+      if (render) {
+        content.push({
+          type: "text" as const,
+          text: render.stale
+            ? `STALE Stage render: captured at revision ${render.revision}, current revision ${render.currentRevision}; rerun verification before relying on the image.`
+            : `Stage render captured at revision ${render.revision}; visual fidelity is not certified.`,
+        });
+      }
+      content.push({ type: "text" as const, text: JSON.stringify(result.summary, null, 2) });
+      return { content };
+    } catch (e) {
+      return errResult(e);
     }
   },
 );
@@ -1432,7 +1911,7 @@ registerTool(
         .optional()
         .describe("Optional world scope: center/radius or min/max."),
       lod: z.enum(["parts", "bbox"]).optional().describe("parts sends leaves; bbox sends one box for the scope."),
-      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts in the snapshot (cap 800)."),
+      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts in the snapshot (cap 20000; default 800)."),
     },
   },
   async (a) => {
@@ -1443,7 +1922,7 @@ registerTool(
       const d = dump as any;
       return textResult(
         `wrote ${d.dumped}/${d.totalParts} parts to viewer/scene.json` +
-          (d.truncated ? " (truncated — target has more parts than the 800 cap, narrow the target)" : "")
+          (d.truncated ? ` (truncated — target has more parts than the ${scope.maxParts} cap, narrow the target)` : "")
       );
     } catch (e) {
       return errResult(e);
@@ -1469,7 +1948,7 @@ registerTool(
         .optional()
         .describe("Optional world scope: center/radius or min/max."),
       lod: z.enum(["parts", "bbox"]).optional().describe("parts sends leaves; bbox sends one box for the scope."),
-      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts in each snapshot (cap 800)."),
+      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional().describe("Maximum parts in each snapshot (cap 20000; default 800)."),
     },
   },
   async (a) => {
@@ -1610,7 +2089,7 @@ registerTool(
       tag: z.string().optional().describe("CollectionService tag."),
       selection: z.boolean().optional().describe("Map the current Studio selection."),
       lod: z.enum(["parts", "bbox"]).optional().describe("parts sends leaves; bbox sends one box per target."),
-      maxParts: z.number().int().min(1).max(MAX_SYNC_PARTS).optional(),
+      maxParts: z.number().int().min(1).max(800).optional().describe("Map-specific maximum parts (cap 800)."),
       detail: z.enum(["summary", "parts"]).optional().describe("summary returns samples; parts returns every matched part."),
     },
   },
@@ -3044,6 +3523,36 @@ function startViewerServer(): Promise<void> {
     const requestUrl = new URL(url, `http://127.0.0.1:${VIEWER_PORT}`);
     const eventPath = requestUrl.pathname;
     const requestedSession = () => stageRuntime(requestUrl.searchParams.get("session") ?? undefined);
+    if (eventPath === "/mirror/options" && req.method === "GET") {
+      try {
+        viewerJson(res, 200, await getMirrorOptions(bridge));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        viewerJson(res, message.includes("stale") ? 409 : 400, { ok: false, error: message });
+      }
+      return;
+    }
+    if (eventPath === "/mirror/options" && req.method === "POST") {
+      const origin = req.headers.origin;
+      if (origin && ![`http://127.0.0.1:${VIEWER_PORT}`, `http://localhost:${VIEWER_PORT}`].includes(origin)) {
+        viewerJson(res, 403, { ok: false, error: "foreign origin" });
+        return;
+      }
+      if (String(req.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+        viewerJson(res, 415, { ok: false, error: "Content-Type must be application/json" });
+        return;
+      }
+      try {
+        const data = await readViewerJson(req);
+        viewerJson(res, 200, await configureMirrorMaxParts(bridge, parseMirrorMaxParts(data?.maxParts), (dump, notify) => writeMirror(dump, notify)));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message.includes("request body exceeds") ? 413 : message.includes("stale") ? 409 : 400;
+        const applied = error && typeof error === "object" && "applied" in error ? (error as { applied?: unknown }).applied : undefined;
+        viewerJson(res, status, { ok: false, error: message, ...(applied ? { applied } : {}) });
+      }
+      return;
+    }
     if (req.method === "POST" && eventPath === "/stage/tool") {
       // Only the Stage contract is exposed; never relay arbitrary MCP or Studio tools.
       const origin = req.headers.origin;
@@ -3057,7 +3566,7 @@ function startViewerServer(): Promise<void> {
         const data = await readViewerJson(req);
         const tool = sharedStageTools.get(data?.name);
         if (!tool) { viewerJson(res, 404, { error: "unknown shared Stage tool" }); return; }
-        if ((data.name === "rbx_stage_commit" || (data.name === "rbx_stage_qa" && data.args?.action === "compare")) && data.place !== bridge.getActivePlace()) {
+        if ((data.name === "rbx_stage_commit" || (data.name === "rbx_stage_qa" && data.args?.action === "compare") || (data.name === "rbx_stage_verify" && typeof data.args?.target === "string")) && data.place !== bridge.getActivePlace()) {
           viewerJson(res, 409, { error: "agent and viewer owner have different active Studio place filters; align them before commit/compare" }); return;
         }
         viewerJson(res, 200, await tool.run(tool.schema.parse(data.args ?? {})));
@@ -3199,7 +3708,7 @@ function startViewerServer(): Promise<void> {
         }
         if (data?.action === "save") {
           if (typeof data.name !== "string" || data.name.trim() === "") throw new Error("library name must be non-empty");
-          const entry = await libraryStore.save({ name: data.name, ops: data.ops, preview: data.preview, filename: data.filename, origin: "user", kind: "saved", category: data.category ?? null });
+           const entry = await libraryStore.save({ name: data.name, ops: data.ops, sockets: data.sockets, preview: data.preview, filename: data.filename, origin: "user", kind: "saved", category: data.category ?? null });
           viewerJson(res, 200, { ok: true, preset: entry });
           return;
         }
@@ -3208,8 +3717,9 @@ function startViewerServer(): Promise<void> {
           const preset = validateLibraryPreset(raw);
           const entry = await libraryStore.save({
             name: typeof data.name === "string" && data.name.trim() ? data.name : preset.name,
-            ops: preset.ops,
-            preview: data.preview ?? preset.preview,
+             ops: preset.ops,
+             sockets: preset.sockets,
+             preview: data.preview ?? preset.preview,
             filename: data.filename,
             created: preset.created,
             origin: "user",
@@ -3279,7 +3789,12 @@ function startViewerServer(): Promise<void> {
             return;
           }
           if (previous !== index) {
-            restoreStageEdit(stage, state);
+            try {
+              mutateStage(stage, () => restoreStageEdit(stage, state), "Restore stage", false);
+            } catch (error) {
+              stage.history.jump(previous);
+              throw error;
+            }
             broadcastStage(stage);
           }
           viewerJson(res, 200, {
@@ -3329,7 +3844,7 @@ function startViewerServer(): Promise<void> {
           const ops = parseStageOps(Array.isArray(data?.ops) ? data.ops : []);
           if (ops.length === 0) throw new Error("append needs a non-empty ops array");
           const changed = mutateStage(stage,
-            () => setManualStage(stage, [...stage.manualOps, ...ops]),
+            () => setManualStage(stage, appendManualStageOps(stage, ops)),
             route === "paste" ? "Paste into stage" : "Append to stage",
           );
           if (changed) broadcastStage(stage);
@@ -3343,19 +3858,52 @@ function startViewerServer(): Promise<void> {
         // without breaking the file-is-truth invariant.
         if (route === "detach") {
           const data = await readViewerJson(req);
-          const name = String(data?.name || "");
+          const rawNames = data?.names !== undefined ? data.names : [data?.name];
+          if (!Array.isArray(rawNames)) throw new Error("stage detach names must be an array");
+          const names: string[] = [];
+          const seen = new Set<string>();
+          for (const rawName of rawNames) {
+            if (typeof rawName !== "string") throw new Error("stage detach names must contain strings");
+            const name = rawName.trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            names.push(name);
+          }
+          if (names.length === 0) throw new Error("stage detach needs a non-empty name or names array");
           const snapshot = stage.state.snapshot();
-          const generation = snapshot.generations.find((g) => g.name === name);
-          if (!generation) throw new Error(`unknown generator: ${name || "(none)"}`);
-          if (!generation.enabled) throw new Error(`${name} is already disabled`);
-          const ops = parseStageOps(generation.ops);
+          const targets = names.map((name) => {
+            const generation = snapshot.generations.find((g) => g.name === name);
+            if (!generation) throw new Error(`unknown generator: ${name}`);
+            if (!generation.enabled) throw new Error(`${name} is already disabled`);
+            return { name, ops: parseStageOps(generation.ops) };
+          });
+          const detachedOps = targets.flatMap((target) => target.ops);
+          const targetNames = new Set(names);
+          const remainingGeneratedOps = snapshot.generations
+            .filter((generation) => generation.enabled && !targetNames.has(generation.name))
+            .flatMap((generation) => parseStageOps(generation.ops));
+          const existingManualOps = structuredClone(stage.manualOps);
+          const copiedDetachedOps = remapStageIdCollisions(
+            detachedOps,
+            stageRefIds([...remainingGeneratedOps, ...existingManualOps]),
+          );
+          const finalManualOps = parseStageOps([...existingManualOps, ...copiedDetachedOps]);
+          if (stageItemCount([...remainingGeneratedOps, ...finalManualOps]) > MAX_STAGE_ITEMS) {
+            throw new Error(`stage detach would exceed the ${MAX_STAGE_ITEMS}-item cap`);
+          }
           const changed = mutateStage(stage, () => {
-            stage.state.setGenerationEnabled(name, false);
-            stage.state.appendManual(ops);
-            stage.manualOps = [...stage.manualOps, ...ops];
-          }, `Detach ${name}`);
+            for (const target of targets) stage.state.setGenerationEnabled(target.name, false);
+            stage.manualOps = structuredClone(finalManualOps);
+            stage.state.clearManual();
+            stage.state.appendManual(stage.manualOps);
+          }, `Detach ${names.join(", ")}`);
           if (changed) broadcastStage(stage);
-          viewerJson(res, 200, { ok: true, detached: name, ops: ops.length, snapshot: stageSnapshot(stage) });
+          viewerJson(res, 200, {
+            ok: true,
+            detached: names.length === 1 ? names[0] : names,
+            ops: detachedOps.length,
+            snapshot: stageSnapshot(stage),
+          });
           return;
         }
         // Stage-wide CSG budget from the viewer. Deliberately unbounded-ish: the useful
@@ -3372,6 +3920,7 @@ function startViewerServer(): Promise<void> {
         }
         if (route === "undo" || route === "redo") {
           const direction = route === "undo" ? -1 : 1;
+          const previous = stage.history.currentIndex();
           const state = stage.history.move(direction);
           if (!state) {
             viewerJson(res, 409, {
@@ -3382,7 +3931,12 @@ function startViewerServer(): Promise<void> {
             });
             return;
           }
-          restoreStageEdit(stage, state);
+          try {
+            mutateStage(stage, () => restoreStageEdit(stage, state), route === "undo" ? "Undo stage" : "Redo stage", false);
+          } catch (error) {
+            stage.history.jump(previous);
+            throw error;
+          }
           broadcastStage(stage);
           viewerJson(res, 200, {
             ok: true,
@@ -3393,7 +3947,18 @@ function startViewerServer(): Promise<void> {
           return;
         }
         if (route === "commit") {
-          const result = await commitStage(stage, "user");
+          const data = await readViewerJson(req);
+          if (data?.place !== undefined && data.place !== bridge.getActivePlace()) {
+            viewerJson(res, 409, { ok: false, error: "agent and viewer owner have different active Studio place filters; align them before commit" });
+            return;
+          }
+          const defaultBuildId = `stage-${stage.id}`.slice(0, 64);
+          const options = validateStageCommitOptions({
+            mode: data?.mode ?? "update-existing",
+            buildId: data?.buildId ?? defaultBuildId,
+            ...(data?.rootName === undefined ? {} : { rootName: data.rootName }),
+          });
+          const result = await commitStage(stage, "user", options);
           viewerJson(res, 200, { ok: true, result, snapshot: stageSnapshot(stage) });
           return;
         }
@@ -3522,6 +4087,7 @@ function startViewerServer(): Promise<void> {
 
 async function main() {
   await bridge.start(PORT);
+  await stageVisibility.load();
   await generatorWatcher.start();
   await mapWatcher.start();
   stageReady = true;

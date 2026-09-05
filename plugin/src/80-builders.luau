@@ -20,6 +20,7 @@ local bevelTopEdges = require(script.Parent.Quality).bevelTopEdges
 local plinthBase = require(script.Parent.Quality).plinthBase
 local HttpService = require(script.Parent.Core).HttpService
 local recorded = require(script.Parent.Core).recorded
+local StageCommit = require(script.Parent.StageCommit)
 local makePart = require(script.Parent.FxParts).makePart
 local PROP_REGEN_SOURCE = require(script.Parent.PropRegen).PROP_REGEN_SOURCE
 --#endregion
@@ -45,7 +46,7 @@ local function buildProp(spec)
 	for i, ps in ipairs(parts) do
 		created[i] = makePart(model, scaleP(ps, k), c[1], c[2], c[3])
 	end
-	model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart")
+	model.PrimaryPart = created[1] or model:FindFirstChildWhichIsA("BasePart")
 
 	-- Snapshot the sources BEFORE csgProp runs — it destroys them to leave one clean solid.
 	--
@@ -108,6 +109,80 @@ local function buildProp(spec)
 	rs.Source = PROP_REGEN_SOURCE
 	rs.Parent = model
 	return model
+end
+
+local function isGenerated(instance, model)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	local managed = model:GetAttribute("BuildKitOwned") == true and type(buildId) == "string"
+	if managed then
+		return instance:GetAttribute("BuildKitOwned") == true
+			and instance:GetAttribute("BuildKitBuildId") == buildId
+	end
+	local foreignOwned = instance:GetAttribute("BuildKitOwned") == true or instance:GetAttribute("BuildKitBuildId") ~= nil
+	local genericGenerated = not managed and model:GetAttribute("BuildKitOwned") == nil and buildId == nil
+	return genericGenerated and not foreignOwned and instance:GetAttribute("BuildKitGenerated") == true
+end
+
+local function clearGenerated(model)
+	local preserved = {}
+	local generated = false
+	local hasGeometry = false
+	local function assertGeneratedSubtree(instance)
+		for _, descendant in ipairs(instance:GetDescendants()) do
+			if not isGenerated(descendant, model) then
+				error("BuildKit regen refuses a mixed generated/unowned subtree: " .. descendant:GetFullName())
+			end
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if isGenerated(child, model) then
+			generated = true
+			assertGeneratedSubtree(child)
+		else
+			preserved[child] = true
+			for _, descendant in ipairs(child:GetDescendants()) do
+				if descendant:IsA("BasePart") then hasGeometry = true end
+				if isGenerated(descendant, model) then
+					error("BuildKit regen found generated content nested under an unowned child: " .. descendant:GetFullName())
+				end
+			end
+		end
+	end
+	if not generated then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") then hasGeometry = true break end
+		end
+		if hasGeometry then
+			error("BuildKit regen cannot identify legacy geometry safely; rebuild this model with the current plugin first")
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if isGenerated(child, model) then child:Destroy() end
+	end
+	return preserved
+end
+
+local function belongsToArtifact(instance, artifacts)
+	for _, artifact in ipairs(artifacts) do
+		if instance == artifact or instance:IsDescendantOf(artifact) then return true end
+	end
+	return false
+end
+
+local function markRegenArtifact(instance, model)
+	instance:SetAttribute("BuildKitGenerated", true)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+		instance:SetAttribute("BuildKitBuildId", buildId)
+		instance:SetAttribute("BuildKitOwned", true)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+		if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+			descendant:SetAttribute("BuildKitBuildId", buildId)
+			descendant:SetAttribute("BuildKitOwned", true)
+		end
+	end
 end
 
 -- a wall along an axis with optional openings (doors/windows)
@@ -944,19 +1019,66 @@ Parametric.regenBuildKit = function(model)
 	if typeof(col) == "Color3" then
 		spec.color = { math.floor(col.R * 255 + 0.5), math.floor(col.G * 255 + 0.5), math.floor(col.B * 255 + 0.5) }
 	end
-	local cf = model:GetPivot()
-	spec.center = { cf.Position.X, cf.Position.Y, cf.Position.Z }
+	local currentPivot = model:GetPivot()
+	local pivotOffset = model:GetAttribute("BuildKitRegenPivotOffset")
+	local root
+	if typeof(pivotOffset) ~= "CFrame" then
+		root = CFrame.new((spec.center and spec.center[1]) or currentPivot.Position.X, (spec.center and spec.center[2]) or currentPivot.Position.Y, (spec.center and spec.center[3]) or currentPivot.Position.Z)
+		pivotOffset = root:ToObjectSpace(currentPivot)
+	else
+		root = currentPivot * pivotOffset:Inverse()
+	end
+	spec.center = { root.Position.X, root.Position.Y, root.Position.Z }
 	spec.parent, spec.name = nil, model.Name
+	local lockToken = StageCommit.enter()
 	_regenBusy[model] = true
-	recorded("BuildKit regen " .. tostring(kind), function()
-		for _, c in ipairs(model:GetChildren()) do
-			c:Destroy()
-		end
-		Detail._regenTarget = model
-		pcall(fn, spec)
-		Detail._regenTarget = nil
+	local ok, result = pcall(function()
+	return recorded("BuildKit regen " .. tostring(kind), function()
+			local preserved = clearGenerated(model)
+			Detail._regenTarget = model
+			local builtOk, builtResult = pcall(fn, spec)
+			Detail._regenTarget = nil
+			if not builtOk then error(builtResult) end
+			local artifacts = {}
+			for _, child in ipairs(model:GetChildren()) do
+				if not preserved[child] then
+					markRegenArtifact(child, model)
+					table.insert(artifacts, child)
+				end
+			end
+			local generatedPrimary = model.PrimaryPart
+			if not (generatedPrimary and belongsToArtifact(generatedPrimary, artifacts)) then
+				generatedPrimary = nil
+				for _, artifact in ipairs(artifacts) do
+					if artifact:IsA("BasePart") then
+						generatedPrimary = artifact
+						break
+					end
+					for _, child in ipairs(artifact:GetDescendants()) do
+						if child:IsA("BasePart") then
+							generatedPrimary = child
+							break
+						end
+					end
+					if generatedPrimary then break end
+				end
+			end
+			if generatedPrimary then model.PrimaryPart = generatedPrimary end
+			local rootRotation = root * CFrame.new(-root.Position)
+			for _, artifact in ipairs(artifacts) do
+				if artifact:IsA("BasePart") then artifact.CFrame = rootRotation * artifact.CFrame end
+				for _, child in ipairs(artifact:GetDescendants()) do
+					if child:IsA("BasePart") then child.CFrame = rootRotation * child.CFrame end
+				end
+			end
+			pivotOffset = root:ToObjectSpace(model:GetPivot())
+			model:SetAttribute("BuildKitRegenPivotOffset", pivotOffset)
+		end)
 	end)
 	_regenBusy[model] = false
+	Detail._regenTarget = nil
+	StageCommit.leave(lockToken)
+	if not ok then error(result) end
 end
 
 --#region exports (generated — do not hand-edit)

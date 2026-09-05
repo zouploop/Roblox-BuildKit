@@ -536,7 +536,7 @@ local function sceneDump(inst, cap, includePart, precise)
 	local out = {}
 	local entryByPart = {}
 	local rootPath = fullPathOf(inst)
-	local limit = math.min(800, math.max(0, math.floor(cap or 800)))
+	local limit = math.min(20000, math.max(0, math.floor(cap or 800)))
 	for i, p in ipairs(parts) do
 		if i > limit then
 			break

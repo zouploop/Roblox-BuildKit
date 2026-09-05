@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { validateStageOps } from "./stage-share.js";
+import { validateSockets, type AssemblySocket } from "./stage-sockets.js";
 import type { StageOp } from "./stage-state.js";
 import { writeAtomicFile } from "./atomic-file.js";
 
@@ -22,6 +23,7 @@ export type LibraryPreset = {
   created: string;
   updated: string;
   ops: StageOp[];
+  sockets?: AssemblySocket[];
   preview?: string;
   origin: LibraryOrigin;
   kind: LibraryKind;
@@ -138,23 +140,49 @@ export function validateLibraryPreset(value: unknown): LibraryPreset {
     if (Buffer.byteLength(value.preview, "utf8") > MAX_PREVIEW_BYTES) throw new Error(`library preview exceeds ${MAX_PREVIEW_BYTES} bytes`);
     preview = value.preview;
   }
+  const sockets = value.sockets === undefined ? undefined : validateSockets(value.sockets);
   const origin = legacy ? "user" : validateOrigin(value.origin);
   const kind = legacy ? "saved" : validateKind(value.kind);
   const category = legacy ? null : validateCategory(value.category);
-  return { format: LIBRARY_FORMAT, version: LIBRARY_VERSION, name, created, updated, ops, origin, kind, category, ...(preview === undefined ? {} : { preview }) };
+  return {
+    format: LIBRARY_FORMAT,
+    version: LIBRARY_VERSION,
+    name,
+    created,
+    updated,
+    ops,
+    origin,
+    kind,
+    category,
+    ...(sockets === undefined ? {} : { sockets }),
+    ...(preview === undefined ? {} : { preview }),
+  };
 }
 
 export function encodeLibraryPreset(input: {
   name: string; ops: unknown; created?: string; updated?: string; preview?: unknown;
-  origin?: LibraryOrigin; kind?: LibraryKind; category?: string | null;
+  sockets?: unknown; origin?: LibraryOrigin; kind?: LibraryKind; category?: string | null;
 }): string {
   const now = new Date().toISOString();
   return JSON.stringify(validateLibraryPreset({
     format: LIBRARY_FORMAT, version: LIBRARY_VERSION, name: input.name,
     created: input.created ?? now, updated: input.updated ?? now, ops: input.ops,
     origin: input.origin ?? "user", kind: input.kind ?? "saved", category: input.category ?? null,
+    ...(input.sockets === undefined ? {} : { sockets: input.sockets }),
     ...(input.preview === undefined ? {} : { preview: input.preview }),
   }));
+}
+
+export function decodeLibraryPreset(serializedOrData: unknown): LibraryPreset {
+  let data = serializedOrData;
+  if (typeof serializedOrData === "string") {
+    try {
+      data = JSON.parse(serializedOrData);
+    } catch (error) {
+      throw new Error(`Invalid library JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return validateLibraryPreset(data);
 }
 
 export class LibraryStore {
@@ -184,7 +212,7 @@ export class LibraryStore {
     for (const item of await readdir(this.directory, { withFileTypes: true })) {
       if (!item.isFile() || item.name === CATEGORIES_FILE || path.extname(item.name).toLowerCase() !== LIBRARY_EXTENSION) continue;
       try {
-        const value = validateLibraryPreset(JSON.parse(await readFile(path.join(this.directory, item.name), "utf8")));
+        const value = decodeLibraryPreset(await readFile(path.join(this.directory, item.name), "utf8"));
         next.set(item.name, { ...value, file: item.name });
       } catch (error) {
         console.error(`[buildkit] ignoring invalid library preset ${item.name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -236,7 +264,7 @@ export class LibraryStore {
 
   async save(input: {
     name: string; ops: unknown; preview?: unknown; filename?: string; created?: string;
-    origin?: LibraryOrigin; kind?: LibraryKind; category?: string | null;
+    sockets?: unknown; origin?: LibraryOrigin; kind?: LibraryKind; category?: string | null;
   }): Promise<LibraryEntry> {
     const filename = sanitizeLibraryFilename(input.filename ?? input.name);
     if (filename === CATEGORIES_FILE) throw new Error("reserved library filename");
@@ -252,12 +280,33 @@ export class LibraryStore {
       name: input.name, ops: input.ops, preview: input.preview,
       created: input.created ?? existing?.created ?? now, updated: now,
       origin: input.origin ?? existing?.origin ?? "user", kind: input.kind ?? existing?.kind ?? "saved", category,
+      ...(input.sockets === undefined
+        ? (existing?.sockets === undefined ? {} : { sockets: existing.sockets })
+        : { sockets: input.sockets }),
     });
     await writeAtomicFile(path.join(this.directory, filename), `${encoded}\n`);
     const entry = { ...validateLibraryPreset(JSON.parse(encoded)), file: filename };
     this.entries.set(filename, entry);
     if (entry.kind === "recent") await this.evictRecent();
     return entry;
+  }
+
+  async import(input: {
+    preset: unknown; name?: string; preview?: unknown; filename?: string;
+    origin?: LibraryOrigin; kind?: LibraryKind; category?: string | null;
+  }): Promise<LibraryEntry> {
+    const preset = decodeLibraryPreset(input.preset);
+    return this.save({
+      name: input.name ?? preset.name,
+      ops: preset.ops,
+      preview: input.preview !== undefined ? input.preview : preset.preview,
+      filename: input.filename,
+      created: preset.created,
+      origin: input.origin ?? "user",
+      kind: input.kind ?? "saved",
+      category: input.category !== undefined ? input.category : preset.category,
+      sockets: preset.sockets,
+    });
   }
 
   async remove(filenameOrName: string): Promise<boolean> {

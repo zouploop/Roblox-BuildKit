@@ -43,6 +43,7 @@ local BRIDGE_TOKEN = require(script.Parent.Core).BRIDGE_TOKEN
 local Lighting = require(script.Parent.Core).Lighting
 local ChangeHistoryService = require(script.Parent.Core).ChangeHistoryService
 local RUNTIME_SOURCE = require(script.Parent.Core).RUNTIME_SOURCE
+local StageCommit = require(script.Parent.StageCommit)
 local FxParts = require(script.Parent.FxParts)
 --#endregion
 
@@ -3285,7 +3286,7 @@ function handlers.sync(args)
 	end)
 end
 
-function handlers.build(spec)
+function handlers.build(spec, stageContext)
 	spec = spec or {}
 	-- Tolerate an accidental double-wrap ({spec={kind=...}}) from a client that
 	-- nested the payload one level too deep.
@@ -3299,7 +3300,10 @@ function handlers.build(spec)
 		end
 		error("build: missing 'kind' (got nil). spec keys = {" .. table.concat(keys, ", ") .. "}")
 	end
-	return recorded("BuildKit build " .. tostring(spec.kind), function()
+	local lockToken = StageCommit.enter(stageContext)
+	local ownsLock = stageContext == nil
+	local ok, result = pcall(function()
+		return recorded("BuildKit build " .. tostring(spec.kind), function()
 		prepSpec(spec) -- apply era preset + real-proportion default size before building
 		FxParts.buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
 		local model
@@ -3402,7 +3406,18 @@ function handlers.build(spec)
 				size = { r1(bsz.X), r1(bsz.Y), r1(bsz.Z) },
 				qa = qa,
 			}
+		end)
 	end)
+	if ownsLock then StageCommit.leave(lockToken) end
+	if not ok then error(result) end
+	return result
+end
+
+-- Stage commits use a private build context and an explicit stable root. Keep this
+-- separate from batch: batch retains its legacy build/edit contract and is not an
+-- idempotency boundary.
+function handlers.stage_commit(args)
+	return StageCommit.commit(args, handlers.build)
 end
 
 -- Build a styled ScreenGui: real copy into StarterGui (shows at gameplay), an

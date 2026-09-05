@@ -259,6 +259,9 @@
   .ground-target { color:var(--ink-3); font-size:11px; overflow-wrap:anywhere; margin-bottom:6px; }
   .ground-actions { display:flex; gap:var(--s1); }
   .ground-actions button { flex:1; }
+  #mirror-max-parts { width:100%; max-width:100%; min-width:0; box-sizing:border-box; display:block; margin:0; }
+  #options-mirror { min-width:0; overflow-wrap:anywhere; }
+  #mirror-max-parts-value { font-family:var(--mono); font-variant-numeric:tabular-nums; }
 
   .dock-stack { position:fixed; box-sizing:border-box; z-index:4; display:flex; flex-direction:column; gap:0; overflow:hidden; background:var(--chrome); border:1px solid var(--seam); border-radius:var(--r-md); }
   .dock-stack[hidden] { display:none !important; }
@@ -330,6 +333,13 @@
         <label class="options-row" for="csg-mode-select"><span>CSG mode</span><select id="csg-mode-select"><option value="edit">Edit operands</option><option value="preview">Preview solids</option></select></label>
         <label class="options-row" for="csg-max"><span>CSG max parts</span><input id="csg-max" type="number" min="1" step="1" value="100" style="width:76px" /></label>
         <div id="csg-limit" class="mode"></div>
+      </section>
+      <section id="options-mirror" class="options-section" hidden>
+        <div class="options-heading">Mirror</div>
+        <label for="mirror-max-parts">Maximum parts <output id="mirror-max-parts-value" for="mirror-max-parts">Loading…</output></label>
+        <input id="mirror-max-parts" type="range" min="1" max="20000" step="1" value="1" disabled aria-describedby="mirror-max-parts-help mirror-options-state" />
+        <div id="mirror-max-parts-help" class="hint">Higher limits show more Studio parts but may reduce Mirror responsiveness.</div>
+        <div id="mirror-options-state" class="hint" role="status" aria-live="polite">Loading authoritative Mirror options…</div>
       </section>
       <section class="options-section">
         <div class="options-heading">Selection</div>
@@ -453,6 +463,7 @@ import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from "three-bvh
 import { addMirrorParts, addPart, addPlaceholder, initScene, meshForPart, selectionTargetForHit } from "./shared.js";
 import { previewCameraFit, previewPlacementDelta } from "./library-preview.js";
 import { deletePatchesForSelection } from "./stage-delete.js";
+import { detachRequestForNames, generatorNamesForSelection } from "./stage-bulk-detach.js";
 import { lockPatchesForSelection } from "./stage-lock.js";
 import { scanStageIssues } from './seam-qa.js';
 
@@ -474,6 +485,7 @@ if (mirrorMode) {
     document.getElementById(id)?.setAttribute("hidden", "");
   }
   document.getElementById("options-csg")?.setAttribute("hidden", "");
+  document.getElementById("options-mirror")?.removeAttribute("hidden");
   document.getElementById("options-ground")?.removeAttribute("hidden");
   document.getElementById("mirror-copy")?.removeAttribute("hidden");
   const mirrorLink = document.getElementById("mode-switch");
@@ -522,6 +534,9 @@ const smartSelectInput = document.getElementById("smart-select");
 const groundTargetLabel = document.getElementById("ground-target");
 const groundSetButton = document.getElementById("ground-set");
 const groundClearButton = document.getElementById("ground-clear");
+const mirrorMaxPartsInput = document.getElementById("mirror-max-parts");
+const mirrorMaxPartsValue = document.getElementById("mirror-max-parts-value");
+const mirrorOptionsState = document.getElementById("mirror-options-state");
 // Stage-wide CSG budget. Any op that sets its own csgMax wins over this. Persisted
 // locally so it survives a reload, and pushed to the server which injects it at commit.
 let stageCsgMax = 100;
@@ -867,6 +882,7 @@ optionsButton?.addEventListener("click", () => {
   const open = optionsPopout?.hidden;
   if (optionsPopout) optionsPopout.hidden = !open;
   optionsButton?.setAttribute("aria-expanded", String(Boolean(open)));
+  if (open && mirrorMode) void loadMirrorOptions();
 });
 document.addEventListener("pointerdown", (event) => {
   if (!event.target?.closest?.("#options-menu")) {
@@ -951,6 +967,79 @@ groundClearButton?.addEventListener("click", async () => {
     setStatus("map ground cleared", "ok");
   } catch (error) {
     setStatus(`ground clear failed: ${error.message}`, "error");
+  }
+});
+
+let mirrorMaxPartsAcknowledged = null;
+let mirrorOptionsPending = false;
+let mirrorOptionsRequest = 0;
+function mirrorOptionsRestartHint(message) {
+  return /stale|restart/i.test(message) ? " Restart Studio to reload the live-sync plugin." : "";
+}
+function renderMirrorOptions(data) {
+  const minParts = Number.isInteger(data?.minParts) ? data.minParts : 1;
+  const maxPartsLimit = Number.isInteger(data?.maxPartsLimit) ? data.maxPartsLimit : 20000;
+  const maxParts = Number(data?.maxParts);
+  if (minParts < 1 || maxPartsLimit > 20000 || minParts > maxPartsLimit || !Number.isInteger(maxParts) || maxParts < minParts || maxParts > maxPartsLimit) {
+    throw new Error("invalid Mirror options response");
+  }
+  mirrorMaxPartsAcknowledged = maxParts;
+  mirrorMaxPartsInput.min = String(minParts);
+  mirrorMaxPartsInput.max = String(maxPartsLimit);
+  mirrorMaxPartsInput.value = String(maxParts);
+  mirrorMaxPartsValue.textContent = String(maxParts);
+  mirrorMaxPartsInput.disabled = mirrorOptionsPending;
+  const interval = Number.isInteger(data?.intervalMs) ? ` Studio sync interval: ${data.intervalMs}ms.` : "";
+  mirrorOptionsState.textContent = data?.enabled === false
+    ? "Autosync paused; changing the limit refreshes this snapshot only."
+    : `Authoritative Mirror setting loaded.${interval}`;
+}
+async function loadMirrorOptions(force = false) {
+  if (!mirrorMode || mirrorOptionsPending && !force) return;
+  const request = ++mirrorOptionsRequest;
+  mirrorOptionsState.textContent = "Loading authoritative Mirror options…";
+  try {
+    const response = await fetch(stageRequestUrl(`/mirror/options?read=${Date.now()}`), { headers: { accept: "application/json" }, cache: "no-store" });
+    if (response.status === 404 || !response.headers.get("content-type")?.includes("application/json")) {
+      throw new Error("Restart BuildKit server to load Mirror options");
+    }
+    const data = await response.json();
+    if (request !== mirrorOptionsRequest) return;
+    if (!response.ok || data?.ok !== true) throw new Error(data?.error || `Mirror options HTTP ${response.status}`);
+    renderMirrorOptions(data);
+  } catch (error) {
+    if (request !== mirrorOptionsRequest) return;
+    mirrorMaxPartsInput.disabled = mirrorMaxPartsAcknowledged === null;
+    if (mirrorMaxPartsAcknowledged === null) mirrorMaxPartsValue.textContent = "Unavailable";
+    mirrorOptionsState.textContent = `Mirror options unavailable: ${error.message}`;
+    setStatus(`Mirror options unavailable: ${error.message}`, "error");
+  }
+}
+mirrorMaxPartsInput?.addEventListener("input", () => {
+  mirrorMaxPartsValue.textContent = mirrorMaxPartsInput.value;
+});
+mirrorMaxPartsInput?.addEventListener("change", async () => {
+  if (!mirrorMode || mirrorMaxPartsAcknowledged === null || mirrorOptionsPending) return;
+  const requested = Number(mirrorMaxPartsInput.value);
+  if (!Number.isInteger(requested)) return;
+  mirrorOptionsRequest += 1;
+  mirrorOptionsPending = true;
+  mirrorMaxPartsInput.disabled = true;
+  setStatus("Mirror options…");
+  try {
+    const data = await postStage("/mirror/options", { maxParts: requested }, "Mirror options");
+    renderMirrorOptions(data);
+    setStatus(`Mirror part limit set to ${mirrorMaxPartsAcknowledged}`, "ok");
+  } catch (error) {
+    mirrorMaxPartsInput.value = String(mirrorMaxPartsAcknowledged);
+    mirrorMaxPartsValue.textContent = String(mirrorMaxPartsAcknowledged);
+    mirrorOptionsState.textContent = `Mirror options failed: ${error.message}${mirrorOptionsRestartHint(error.message)}`;
+    setStatus(`Mirror options failed: ${error.message}`, "error");
+    mirrorOptionsPending = false;
+    await loadMirrorOptions(true);
+  } finally {
+    mirrorOptionsPending = false;
+    mirrorMaxPartsInput.disabled = false;
   }
 });
 
@@ -1097,17 +1186,46 @@ function renderOp(op, opIndex, targetGroup = group) {
 function selectionIdentity(opIndex, partIndex, ops) {
   const op = ops[opIndex];
   const args = op?.args || {};
+  const opId = typeof args.id === "string" && args.id.trim() ? args.id : null;
   const opName = typeof args.name === "string" && args.name.trim() ? args.name : null;
   const sameOpName = opName && ops.filter((item) => item?.args?.name === opName).length === 1 ? opName : null;
   const parts = args.kind === "prop" && Array.isArray(args.parts) ? args.parts : [];
+  const partId = partIndex >= 0 && typeof parts[partIndex]?.id === "string" && parts[partIndex].id.trim()
+    ? parts[partIndex].id
+    : null;
   const partName = partIndex >= 0 && typeof parts[partIndex]?.name === "string" && parts[partIndex].name.trim()
     ? parts[partIndex].name
     : null;
   const samePartName = partName && parts.filter((part) => part?.name === partName).length === 1 ? partName : null;
-  return { opIndex, partIndex, opName: sameOpName, partName: samePartName };
+  return { opIndex, partIndex, opId, partId, opName: sameOpName, partName: samePartName };
 }
 
 function remapSelection(ref, ops) {
+  if (ref?.opId || ref?.partId) {
+    const opMatches = ops.reduce((matches, op, index) => {
+      if (ref.opId && op?.args?.id === ref.opId) matches.push(index);
+      return matches;
+    }, []);
+    if (!ref.opId) {
+      const partMatches = [];
+      ops.forEach((op, opIndex) => {
+        const parts = op?.args?.kind === "prop" && Array.isArray(op.args.parts) ? op.args.parts : [];
+        parts.forEach((part, partIndex) => { if (part?.id === ref.partId) partMatches.push({ opIndex, partIndex }); });
+      });
+      return partMatches.length === 1 ? partMatches[0] : null;
+    }
+    if (opMatches.length !== 1) return null;
+    if (opMatches.length === 1) {
+      const opIndex = opMatches[0];
+      if (ref.partIndex < 0 || !ref.partId) return { opIndex, partIndex: ref.partIndex };
+      const parts = ops[opIndex]?.args?.kind === "prop" && Array.isArray(ops[opIndex].args.parts) ? ops[opIndex].args.parts : [];
+      const partMatches = parts.reduce((matches, part, index) => {
+        if (part?.id === ref.partId) matches.push(index);
+        return matches;
+      }, []);
+      return partMatches.length === 1 ? { opIndex, partIndex: partMatches[0] } : null;
+    }
+  }
   if (!ref?.opName) return ref;
   const opMatches = ops.reduce((matches, op, index) => {
     if (op?.args?.name === ref.opName) matches.push(index);
@@ -3845,11 +3963,27 @@ function generatorOwning(opIndex) {
   return null;
 }
 
-function detachGenerator(name) {
-  const displayName = friendlyLabel(name);
-  return postStage("/stage/detach", { name }, `detach ${displayName}`)
-    .then((data) => setStatus(`${displayName} detached (${data.ops} ops now editable)`, "ok"))
+function detachGenerators(names, ignoredSelection = false) {
+  const body = detachRequestForNames(names);
+  if (!body) return Promise.resolve(false);
+  const unique = body.names || [body.name];
+  const displayName = unique.map((name) => friendlyLabel(name)).join(", ");
+  return postStage("/stage/detach", body, `detach ${unique.length} generator${unique.length === 1 ? "" : "s"}`)
+    .then((data) => {
+      if (data?.snapshot !== undefined && !applyStageResponseSnapshot(data)) throw new Error("invalid stage snapshot");
+      const ops = Number.isInteger(data?.ops) ? ` (${data.ops} ops now editable)` : "";
+      const note = ignoredSelection ? "; non-generated selection left unchanged" : "";
+      setStatus(`${displayName} detached${ops}${note}`, "ok");
+    })
     .catch((error) => setStatus(`detach failed: ${error.message}`, "error"));
+}
+
+function detachSelectedGenerators() {
+  const items = selectedObjects.length ? selectedObjects : (selected ? [selected] : []);
+  const names = generatorNamesForSelection(items, generatorOwning);
+  if (!names.length) return setStatus("Select something built by a generator file first");
+  const ignoredSelection = items.some(({ opIndex }) => !generatorOwning(opIndex));
+  detachGenerators(names, ignoredSelection);
 }
 
 function deleteStageSelection() {
@@ -3884,9 +4018,8 @@ function toggleStageSelectionLock() {
 lockButton?.addEventListener("click", toggleStageSelectionLock);
 
 document.getElementById("detach")?.addEventListener("click", () => {
-  const owner = selected ? generatorOwning(selected.opIndex) : null;
-  if (!owner) return setStatus("Select something built by a generator file first");
-  detachGenerator(owner);
+  if (mirrorMode) return;
+  detachSelectedGenerators();
 });
 
 // ---- stage clipboard (copy / paste / duplicate) ----------------------------------
@@ -4204,7 +4337,10 @@ renderProperties();
 updateCsgLabel();
 updateGroupingButtons();
 renderGroundTarget(mirrorGroundTarget);
-if (mirrorMode) void loadGroundTarget();
+if (mirrorMode) {
+  void loadGroundTarget();
+  void loadMirrorOptions();
+}
 
 const es = new EventSource(stageRequestUrl(mirrorMode ? "/live/events" : "/stage/events"));
 es.addEventListener("open", () => {

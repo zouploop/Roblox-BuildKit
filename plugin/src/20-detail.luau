@@ -65,7 +65,71 @@ end
 
 local Detail = {}
 Detail._regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
+Detail._buildParent = nil -- private Stage commit context; takes precedence over name lookup
+Detail._buildCreated = nil -- models created by the current private build call
+Detail._buildThread = nil -- coroutine that owns the private Stage commit context
+
+local function privateChild(parent, name)
+	local found = nil
+	for _, child in ipairs(parent:GetChildren()) do
+		if child.Name == name then
+			if found then
+				error("ambiguous private build parent '" .. name .. "' under " .. parent.Name)
+			end
+			found = child
+		end
+	end
+	return found
+end
+
+local function privateParent(parentName)
+	local root = Detail._buildParent
+	if not root then return nil end
+	if parentName == nil then return root end
+	if type(parentName) ~= "string" or parentName == "" then
+		error("private build parent must be a non-empty candidate name or path")
+	end
+
+	-- Prefer an exact direct name so model names containing dots remain usable.
+	local direct = privateChild(root, parentName)
+	if direct then
+		if not direct:IsA("Model") then error("private build parent is not a Model: " .. parentName) end
+		return direct
+	end
+	if parentName == root.Name then return root end
+
+	local path = parentName
+	local prefix = root.Name .. "."
+	if string.sub(path, 1, #prefix) == prefix then
+		path = string.sub(path, #prefix + 1)
+	elseif not string.find(path, ".", 1, true) then
+		error("private build parent not found in candidate: " .. parentName)
+	end
+	if path == "" or string.sub(path, 1, 1) == "." or string.sub(path, -1) == "." or string.find(path, "..", 1, true) then
+		error("invalid private build parent path: " .. parentName)
+	end
+
+	local current = root
+	for segment in string.gmatch(path, "[^%.]+") do
+		current = privateChild(current, segment)
+		if not current then error("private build parent not found in candidate: " .. parentName) end
+	end
+	if not current:IsA("Model") then error("private build parent is not a Model: " .. parentName) end
+	return current
+end
+
 local function getOrMakeModel(parentName, name)
+	if Detail._buildParent then
+		if Detail._buildThread ~= coroutine.running() then
+			error("private Stage commit build context belongs to another coroutine")
+		end
+		local parent = privateParent(parentName)
+		local m = Instance.new("Model")
+		m.Name = name
+		m.Parent = parent
+		if Detail._buildCreated then table.insert(Detail._buildCreated, m) end
+		return m
+	end
 	if Detail._regenTarget then
 		return Detail._regenTarget
 	end
