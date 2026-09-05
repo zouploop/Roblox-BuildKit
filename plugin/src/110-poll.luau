@@ -44,7 +44,8 @@ end
 -- Keep the live-sync contract at the plugin boundary too. Node validates the same
 -- shape, but the bridge is a local trust boundary and callers can still send commands
 -- directly. A missing scoped target is an empty scene, not a stale mirror.
-local MAX_SYNC_PARTS = 800
+local DEFAULT_SYNC_PARTS = 800
+local MAX_SYNC_PARTS = 20000
 local function finiteNumber(value)
 	return type(value) == "number" and value == value and value < math.huge and value > -math.huge
 end
@@ -108,7 +109,7 @@ local liveSyncScope = normalizeScope({
 	target = (type(savedTarget) == "string" and savedTarget ~= "") and savedTarget or "workspace",
 	lod = savedLod == "bbox" and "bbox" or "parts",
 	maxParts = savedMaxParts,
-}, { target = "workspace", lod = "parts", maxParts = MAX_SYNC_PARTS })
+}, { target = "workspace", lod = "parts", maxParts = DEFAULT_SYNC_PARTS })
 
 local function emptyDump(scope, coverage)
 	return {
@@ -195,7 +196,7 @@ local function bboxDump(inst, scope)
 end
 
 local function scopedSceneDump(args, allowMissing)
-	local scope = normalizeScope(args or {}, { target = "workspace", lod = "parts", maxParts = MAX_SYNC_PARTS })
+	local scope = normalizeScope(args or {}, { target = "workspace", lod = "parts", maxParts = DEFAULT_SYNC_PARTS })
 	local inst
 	if args and (args.selection == true or args.target == "selection") then
 		local selected = game:GetService("Selection"):Get()
@@ -213,7 +214,7 @@ local function scopedSceneDump(args, allowMissing)
 	local dump = sceneDump(inst, scope.maxParts, scope.region and function(part)
 		local position = part.Position
 		return inRegion({ position.X, position.Y, position.Z }, scope.region)
-	end or nil)
+	end or nil, args ~= nil and args.precise == true)
 	if scope.region then
 		-- The hierarchy was built before the region filter; omit it rather than expose
 		-- a tree that contains nodes outside the requested scope.
@@ -243,8 +244,15 @@ local liveSyncEnabled = plugin:GetSetting("bk_liveSync") ~= false
 local liveSyncIntervalMs = clampLiveSyncInterval(plugin:GetSetting("bk_liveSyncIntervalMs"))
 local mirrorJson = nil
 
+local function liveSyncStatus()
+	local result = { enabled = liveSyncEnabled, intervalMs = liveSyncIntervalMs, lod = liveSyncScope.lod, maxParts = liveSyncScope.maxParts }
+	if liveSyncScope.target then result.target = liveSyncScope.target else result.region = liveSyncScope.region end
+	return result
+end
+
 local function configureLiveSync(args)
 	args = args or {}
+	if args.readOnly == true then return liveSyncStatus() end
 	if args.enabled ~= nil then liveSyncEnabled = args.enabled == true end
 	if args.intervalMs ~= nil then liveSyncIntervalMs = clampLiveSyncInterval(args.intervalMs) end
 	if args.target ~= nil or args.region ~= nil or args.lod ~= nil or args.maxParts ~= nil then
@@ -257,9 +265,7 @@ local function configureLiveSync(args)
 	plugin:SetSetting("bk_liveSyncIntervalMs", liveSyncIntervalMs)
 	-- Re-enable/reconfigure sends a fresh snapshot, including after a bridge restart.
 	mirrorJson = nil
-	local result = { enabled = liveSyncEnabled, intervalMs = liveSyncIntervalMs, lod = liveSyncScope.lod, maxParts = liveSyncScope.maxParts }
-	if liveSyncScope.target then result.target = liveSyncScope.target else result.region = liveSyncScope.region end
-	return result
+	return liveSyncStatus()
 end
 
 -- rbx_live_sync_start/stop use the normal command path to control this plugin-side loop.

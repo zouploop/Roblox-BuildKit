@@ -23,6 +23,7 @@ const MODULES = [
 	["80-builders.luau", "Builders"],
 	["90-gui.luau", "Gui"],
 	["100-handlers.luau", "Handlers"],
+	["105-stage-commit.luau", "StageCommit"],
 	["110-poll.luau", "Poll"],
 	["120-toolbar.luau", "Toolbar"],
 	["130-settings.luau", "Settings"],
@@ -43,6 +44,7 @@ require(Modules.PropRegen)
 require(Modules.PropPresets)
 require(Modules.Builders)
 require(Modules.Gui)
+require(Modules.StageCommit)
 require(Modules.Handlers)
 require(Modules.Poll)
 require(Modules.Toolbar)

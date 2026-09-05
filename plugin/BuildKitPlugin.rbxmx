@@ -17,6 +17,7 @@ require(Modules.PropRegen)
 require(Modules.PropPresets)
 require(Modules.Builders)
 require(Modules.Gui)
+require(Modules.StageCommit)
 require(Modules.Handlers)
 require(Modules.Poll)
 require(Modules.Toolbar)
@@ -762,7 +763,7 @@ local function sceneDump(inst, cap, includePart, precise)
 	local out = {}
 	local entryByPart = {}
 	local rootPath = fullPathOf(inst)
-	local limit = math.min(800, math.max(0, math.floor(cap or 800)))
+	local limit = math.min(20000, math.max(0, math.floor(cap or 800)))
 	for i, p in ipairs(parts) do
 		if i > limit then
 			break
@@ -936,7 +937,71 @@ end
 
 local Detail = {}
 Detail._regenTarget = nil -- during in-place regen, getOrMakeModel returns this instead of a new Model
+Detail._buildParent = nil -- private Stage commit context; takes precedence over name lookup
+Detail._buildCreated = nil -- models created by the current private build call
+Detail._buildThread = nil -- coroutine that owns the private Stage commit context
+
+local function privateChild(parent, name)
+	local found = nil
+	for _, child in ipairs(parent:GetChildren()) do
+		if child.Name == name then
+			if found then
+				error("ambiguous private build parent '" .. name .. "' under " .. parent.Name)
+			end
+			found = child
+		end
+	end
+	return found
+end
+
+local function privateParent(parentName)
+	local root = Detail._buildParent
+	if not root then return nil end
+	if parentName == nil then return root end
+	if type(parentName) ~= "string" or parentName == "" then
+		error("private build parent must be a non-empty candidate name or path")
+	end
+
+	-- Prefer an exact direct name so model names containing dots remain usable.
+	local direct = privateChild(root, parentName)
+	if direct then
+		if not direct:IsA("Model") then error("private build parent is not a Model: " .. parentName) end
+		return direct
+	end
+	if parentName == root.Name then return root end
+
+	local path = parentName
+	local prefix = root.Name .. "."
+	if string.sub(path, 1, #prefix) == prefix then
+		path = string.sub(path, #prefix + 1)
+	elseif not string.find(path, ".", 1, true) then
+		error("private build parent not found in candidate: " .. parentName)
+	end
+	if path == "" or string.sub(path, 1, 1) == "." or string.sub(path, -1) == "." or string.find(path, "..", 1, true) then
+		error("invalid private build parent path: " .. parentName)
+	end
+
+	local current = root
+	for segment in string.gmatch(path, "[^%.]+") do
+		current = privateChild(current, segment)
+		if not current then error("private build parent not found in candidate: " .. parentName) end
+	end
+	if not current:IsA("Model") then error("private build parent is not a Model: " .. parentName) end
+	return current
+end
+
 local function getOrMakeModel(parentName, name)
+	if Detail._buildParent then
+		if Detail._buildThread ~= coroutine.running() then
+			error("private Stage commit build context belongs to another coroutine")
+		end
+		local parent = privateParent(parentName)
+		local m = Instance.new("Model")
+		m.Name = name
+		m.Parent = parent
+		if Detail._buildCreated then table.insert(Detail._buildCreated, m) end
+		return m
+	end
 	if Detail._regenTarget then
 		return Detail._regenTarget
 	end
@@ -986,6 +1051,14 @@ local PARAMETRIC_KINDS = {
 	fridge = true, stove = true, toilet = true, bathtub = true, prop = true,
 }
 local _watched, _pending, _regenBusy = {}, {}, {}
+local REGEN_ATTRIBUTES = { Scale = true, Width = true, Height = true, Depth = true, Color = true }
+
+local function markGenerated(instance)
+	instance:SetAttribute("BuildKitGenerated", true)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+	end
+end
 
 local function tagBuildKit(model, spec)
 	if not (model and spec and PARAMETRIC_KINDS[spec.kind]) then return end
@@ -1003,6 +1076,12 @@ local function tagBuildKit(model, spec)
 	if spec.color then
 		model:SetAttribute("Color", Color3.fromRGB(spec.color[1], spec.color[2], spec.color[3]))
 	end
+	for _, child in ipairs(model:GetChildren()) do
+		markGenerated(child)
+	end
+	local center = spec.center or { 0, 0, 0 }
+	local root = CFrame.new(center[1], center[2], center[3])
+	model:SetAttribute("BuildKitRegenPivotOffset", root:ToObjectSpace(model:GetPivot()))
 end
 
 local function watchBuildKit(model)
@@ -1010,7 +1089,7 @@ local function watchBuildKit(model)
 	_watched[model] = true
 	model.AttributeChanged:Connect(function(attr)
 		-- ignore internal tags + ignore changes made BY a regen
-		if attr == "BuildKitKind" or attr == "BuildKitSpec" or _regenBusy[model] or _pending[model] then return end
+		if not REGEN_ATTRIBUTES[attr] or _regenBusy[model] or _pending[model] then return end
 		_pending[model] = true
 		task.defer(function() -- debounce so multi-attribute edits batch into one rebuild
 			_pending[model] = nil
@@ -1391,14 +1470,101 @@ local function getParts()
 	local ok, d = pcall(function() return Http:JSONDecode(j) end)
 	return (ok and type(d) == "table") and d or {}
 end
+local function isGenerated(instance)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	local managed = model:GetAttribute("BuildKitOwned") == true and type(buildId) == "string"
+	if managed then
+		return instance:GetAttribute("BuildKitOwned") == true
+			and instance:GetAttribute("BuildKitBuildId") == buildId
+	end
+	local foreignOwned = instance:GetAttribute("BuildKitOwned") == true or instance:GetAttribute("BuildKitBuildId") ~= nil
+	local genericGenerated = not managed and model:GetAttribute("BuildKitOwned") == nil and buildId == nil
+	return genericGenerated and not foreignOwned and instance:GetAttribute("BuildKitGenerated") == true
+end
+local function assertGeneratedSubtree(instance)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if not isGenerated(descendant) then
+			error("BuildKit regen refuses a mixed generated/unowned subtree: " .. descendant:GetFullName())
+		end
+	end
+end
+local function clearGenerated()
+	local generated = false
+	local hasGeometry = false
+	for _, child in ipairs(model:GetChildren()) do
+		if child ~= script and isGenerated(child) then
+			generated = true
+			assertGeneratedSubtree(child)
+		else
+			for _, descendant in ipairs(child:GetDescendants()) do
+				if descendant:IsA("BasePart") then hasGeometry = true end
+				if isGenerated(descendant) then
+					error("BuildKit regen found generated content nested under an unowned child: " .. descendant:GetFullName())
+				end
+			end
+		end
+	end
+	if not generated then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") then hasGeometry = true break end
+		end
+		if hasGeometry then
+			error("BuildKit regen cannot identify legacy geometry safely; rebuild this model with the current plugin first")
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if child ~= script and isGenerated(child) then child:Destroy() end
+	end
+end
+local function markGenerated(instance)
+	instance:SetAttribute("BuildKitGenerated", true)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+		instance:SetAttribute("BuildKitBuildId", buildId)
+		instance:SetAttribute("BuildKitOwned", true)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+		if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+			descendant:SetAttribute("BuildKitBuildId", buildId)
+			descendant:SetAttribute("BuildKitOwned", true)
+		end
+	end
+end
 local building = false
 local function build()
 	if building then return end
 	building = true
+	local ok, result = pcall(function()
 	local scale = tonumber(model:GetAttribute("Scale")) or 1
-	local c = model:GetPivot().Position
-	for _, ch in ipairs(model:GetChildren()) do if ch:IsA("BasePart") then ch:Destroy() end end
-	for _, ps in ipairs(getParts()) do
+	local parts = getParts()
+	local currentPivot = model:GetPivot()
+	local pivotOffset = model:GetAttribute("BuildKitRegenPivotOffset")
+	local root
+	if typeof(pivotOffset) ~= "CFrame" then
+		local rawSpec = model:GetAttribute("BuildKitSpec")
+		local okSpec, savedSpec = pcall(function() return Http:JSONDecode(rawSpec or "") end)
+		local center = okSpec and type(savedSpec) == "table" and savedSpec.center
+		if type(center) == "table" and #center == 3 then
+			root = CFrame.new(center[1], center[2], center[3])
+			local first = parts[1] or {}
+			local pos, rot = first.pos or { 0, 0, 0 }, first.rot
+			local firstPivot = CFrame.new(center[1] + pos[1], center[2] + pos[2], center[3] + pos[3])
+			if type(rot) == "table" then firstPivot = firstPivot * CFrame.Angles(math.rad(rot[1]), math.rad(rot[2]), math.rad(rot[3])) end
+			pivotOffset = root:ToObjectSpace(firstPivot)
+			root = currentPivot * pivotOffset:Inverse()
+		else
+			root = CFrame.new(currentPivot.Position)
+			pivotOffset = CFrame.new()
+		end
+	else
+		root = currentPivot * pivotOffset:Inverse()
+	end
+	local c = root.Position
+	local rootRotation = root * CFrame.new(-root.Position)
+	clearGenerated()
+	local firstPart
+	for _, ps in ipairs(parts) do
 		local sz, pos = ps.size or { 1, 1, 1 }, ps.pos or { 0, 0, 0 }
 		local p
 		if tostring(ps.shape):lower() == "wedge" then
@@ -1421,14 +1587,21 @@ local function build()
 		if ps.op then p:SetAttribute("__op", tostring(ps.op)) end
 		if ps.negate then p:SetAttribute("__negate", true) end
 		p.Parent = model
+		if not firstPart then firstPart = p end
 		if ps.fx then fx(p, ps.fx) end
 		if ps.light then
 			local l = Instance.new("PointLight"); l.Color = col(ps.light.color, p.Color)
 			l.Brightness = ps.light.brightness or 1; l.Range = ps.light.range or 8; l.Parent = p
 		end
+		markGenerated(p)
+		p.CFrame = rootRotation * p.CFrame
 	end
-	if not model.PrimaryPart then model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart") end
+	if firstPart then model.PrimaryPart = firstPart end
+	pivotOffset = root:ToObjectSpace(model:GetPivot())
+	model:SetAttribute("BuildKitRegenPivotOffset", pivotOffset)
+	end)
 	building = false
+	if not ok then error(result) end
 end
 local hasGeom = false
 for _, ch in ipairs(model:GetChildren()) do if ch:IsA("BasePart") then hasGeom = true break end end
@@ -2313,6 +2486,7 @@ local bevelTopEdges = require(script.Parent.Quality).bevelTopEdges
 local plinthBase = require(script.Parent.Quality).plinthBase
 local HttpService = require(script.Parent.Core).HttpService
 local recorded = require(script.Parent.Core).recorded
+local StageCommit = require(script.Parent.StageCommit)
 local makePart = require(script.Parent.FxParts).makePart
 local PROP_REGEN_SOURCE = require(script.Parent.PropRegen).PROP_REGEN_SOURCE
 --#endregion
@@ -2338,7 +2512,7 @@ local function buildProp(spec)
 	for i, ps in ipairs(parts) do
 		created[i] = makePart(model, scaleP(ps, k), c[1], c[2], c[3])
 	end
-	model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart")
+	model.PrimaryPart = created[1] or model:FindFirstChildWhichIsA("BasePart")
 
 	-- Snapshot the sources BEFORE csgProp runs — it destroys them to leave one clean solid.
 	--
@@ -2401,6 +2575,80 @@ local function buildProp(spec)
 	rs.Source = PROP_REGEN_SOURCE
 	rs.Parent = model
 	return model
+end
+
+local function isGenerated(instance, model)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	local managed = model:GetAttribute("BuildKitOwned") == true and type(buildId) == "string"
+	if managed then
+		return instance:GetAttribute("BuildKitOwned") == true
+			and instance:GetAttribute("BuildKitBuildId") == buildId
+	end
+	local foreignOwned = instance:GetAttribute("BuildKitOwned") == true or instance:GetAttribute("BuildKitBuildId") ~= nil
+	local genericGenerated = not managed and model:GetAttribute("BuildKitOwned") == nil and buildId == nil
+	return genericGenerated and not foreignOwned and instance:GetAttribute("BuildKitGenerated") == true
+end
+
+local function clearGenerated(model)
+	local preserved = {}
+	local generated = false
+	local hasGeometry = false
+	local function assertGeneratedSubtree(instance)
+		for _, descendant in ipairs(instance:GetDescendants()) do
+			if not isGenerated(descendant, model) then
+				error("BuildKit regen refuses a mixed generated/unowned subtree: " .. descendant:GetFullName())
+			end
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if isGenerated(child, model) then
+			generated = true
+			assertGeneratedSubtree(child)
+		else
+			preserved[child] = true
+			for _, descendant in ipairs(child:GetDescendants()) do
+				if descendant:IsA("BasePart") then hasGeometry = true end
+				if isGenerated(descendant, model) then
+					error("BuildKit regen found generated content nested under an unowned child: " .. descendant:GetFullName())
+				end
+			end
+		end
+	end
+	if not generated then
+		for _, descendant in ipairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") then hasGeometry = true break end
+		end
+		if hasGeometry then
+			error("BuildKit regen cannot identify legacy geometry safely; rebuild this model with the current plugin first")
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if isGenerated(child, model) then child:Destroy() end
+	end
+	return preserved
+end
+
+local function belongsToArtifact(instance, artifacts)
+	for _, artifact in ipairs(artifacts) do
+		if instance == artifact or instance:IsDescendantOf(artifact) then return true end
+	end
+	return false
+end
+
+local function markRegenArtifact(instance, model)
+	instance:SetAttribute("BuildKitGenerated", true)
+	local buildId = model:GetAttribute("BuildKitBuildId")
+	if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+		instance:SetAttribute("BuildKitBuildId", buildId)
+		instance:SetAttribute("BuildKitOwned", true)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitGenerated", true)
+		if buildId ~= nil and model:GetAttribute("BuildKitOwned") == true then
+			descendant:SetAttribute("BuildKitBuildId", buildId)
+			descendant:SetAttribute("BuildKitOwned", true)
+		end
+	end
 end
 
 -- a wall along an axis with optional openings (doors/windows)
@@ -3237,19 +3485,66 @@ Parametric.regenBuildKit = function(model)
 	if typeof(col) == "Color3" then
 		spec.color = { math.floor(col.R * 255 + 0.5), math.floor(col.G * 255 + 0.5), math.floor(col.B * 255 + 0.5) }
 	end
-	local cf = model:GetPivot()
-	spec.center = { cf.Position.X, cf.Position.Y, cf.Position.Z }
+	local currentPivot = model:GetPivot()
+	local pivotOffset = model:GetAttribute("BuildKitRegenPivotOffset")
+	local root
+	if typeof(pivotOffset) ~= "CFrame" then
+		root = CFrame.new((spec.center and spec.center[1]) or currentPivot.Position.X, (spec.center and spec.center[2]) or currentPivot.Position.Y, (spec.center and spec.center[3]) or currentPivot.Position.Z)
+		pivotOffset = root:ToObjectSpace(currentPivot)
+	else
+		root = currentPivot * pivotOffset:Inverse()
+	end
+	spec.center = { root.Position.X, root.Position.Y, root.Position.Z }
 	spec.parent, spec.name = nil, model.Name
+	local lockToken = StageCommit.enter()
 	_regenBusy[model] = true
-	recorded("BuildKit regen " .. tostring(kind), function()
-		for _, c in ipairs(model:GetChildren()) do
-			c:Destroy()
-		end
-		Detail._regenTarget = model
-		pcall(fn, spec)
-		Detail._regenTarget = nil
+	local ok, result = pcall(function()
+	return recorded("BuildKit regen " .. tostring(kind), function()
+			local preserved = clearGenerated(model)
+			Detail._regenTarget = model
+			local builtOk, builtResult = pcall(fn, spec)
+			Detail._regenTarget = nil
+			if not builtOk then error(builtResult) end
+			local artifacts = {}
+			for _, child in ipairs(model:GetChildren()) do
+				if not preserved[child] then
+					markRegenArtifact(child, model)
+					table.insert(artifacts, child)
+				end
+			end
+			local generatedPrimary = model.PrimaryPart
+			if not (generatedPrimary and belongsToArtifact(generatedPrimary, artifacts)) then
+				generatedPrimary = nil
+				for _, artifact in ipairs(artifacts) do
+					if artifact:IsA("BasePart") then
+						generatedPrimary = artifact
+						break
+					end
+					for _, child in ipairs(artifact:GetDescendants()) do
+						if child:IsA("BasePart") then
+							generatedPrimary = child
+							break
+						end
+					end
+					if generatedPrimary then break end
+				end
+			end
+			if generatedPrimary then model.PrimaryPart = generatedPrimary end
+			local rootRotation = root * CFrame.new(-root.Position)
+			for _, artifact in ipairs(artifacts) do
+				if artifact:IsA("BasePart") then artifact.CFrame = rootRotation * artifact.CFrame end
+				for _, child in ipairs(artifact:GetDescendants()) do
+					if child:IsA("BasePart") then child.CFrame = rootRotation * child.CFrame end
+				end
+			end
+			pivotOffset = root:ToObjectSpace(model:GetPivot())
+			model:SetAttribute("BuildKitRegenPivotOffset", pivotOffset)
+		end)
 	end)
 	_regenBusy[model] = false
+	Detail._regenTarget = nil
+	StageCommit.leave(lockToken)
+	if not ok then error(result) end
 end
 
 --#region exports (generated — do not hand-edit)
@@ -3742,6 +4037,7 @@ local BRIDGE_TOKEN = require(script.Parent.Core).BRIDGE_TOKEN
 local Lighting = require(script.Parent.Core).Lighting
 local ChangeHistoryService = require(script.Parent.Core).ChangeHistoryService
 local RUNTIME_SOURCE = require(script.Parent.Core).RUNTIME_SOURCE
+local StageCommit = require(script.Parent.StageCommit)
 local FxParts = require(script.Parent.FxParts)
 --#endregion
 
@@ -6984,7 +7280,7 @@ function handlers.sync(args)
 	end)
 end
 
-function handlers.build(spec)
+function handlers.build(spec, stageContext)
 	spec = spec or {}
 	-- Tolerate an accidental double-wrap ({spec={kind=...}}) from a client that
 	-- nested the payload one level too deep.
@@ -6998,7 +7294,10 @@ function handlers.build(spec)
 		end
 		error("build: missing 'kind' (got nil). spec keys = {" .. table.concat(keys, ", ") .. "}")
 	end
-	return recorded("BuildKit build " .. tostring(spec.kind), function()
+	local lockToken = StageCommit.enter(stageContext)
+	local ownsLock = stageContext == nil
+	local ok, result = pcall(function()
+		return recorded("BuildKit build " .. tostring(spec.kind), function()
 		prepSpec(spec) -- apply era preset + real-proportion default size before building
 		FxParts.buildWarnings = {} -- reset primitive-guard warnings for this build (shared upvalue with makePart)
 		local model
@@ -7101,7 +7400,18 @@ function handlers.build(spec)
 				size = { r1(bsz.X), r1(bsz.Y), r1(bsz.Z) },
 				qa = qa,
 			}
+		end)
 	end)
+	if ownsLock then StageCommit.leave(lockToken) end
+	if not ok then error(result) end
+	return result
+end
+
+-- Stage commits use a private build context and an explicit stable root. Keep this
+-- separate from batch: batch retains its legacy build/edit contract and is not an
+-- idempotency boundary.
+function handlers.stage_commit(args)
+	return StageCommit.commit(args, handlers.build)
 end
 
 -- Build a styled ScreenGui: real copy into StarterGui (shows at gameplay), an
@@ -7242,6 +7552,369 @@ return { handlers = handlers, CHEST_LID_SOURCE = CHEST_LID_SOURCE }
 			</Item>
 			<Item class="ModuleScript" referent="RBX14">
 				<Properties>
+					<string name="Name">StageCommit</string>
+					<ProtectedString name="Source"><![CDATA[--!nocheck
+--#region imports (generated — do not hand-edit)
+local Core = require(script.Parent.Core)
+local Detail = require(script.Parent.Detail)
+local recorded = Core.recorded
+--#endregion
+
+-- A Stage commit is deliberately narrower than batch. It owns one stable root and
+-- only accepts build operations, so an update can be constructed privately and
+-- swapped without guessing which user object a name refers to.
+local MAX_STAGE_ITEMS = 5000
+local BUILD_KINDS = {
+	slab = true, room = true, stairs = true, cabinet = true, table = true, shelf = true,
+	bed = true, chair = true, sofa = true, armchair = true, desk = true, nightstand = true,
+	dresser = true, wardrobe = true, fridge = true, stove = true, toilet = true,
+	bathtub = true, prop = true,
+}
+local activeToken = nil
+
+-- Builders can yield while CSG completes. Keep the private Detail context and the
+-- target snapshot exclusive across that yield; a second build fails closed instead
+-- of accidentally writing into another transaction's candidate.
+local function enter(context)
+	if context ~= nil then
+		if activeToken ~= context then error("BuildKit build transaction is busy") end
+		return context
+	end
+	if activeToken then error("BuildKit build transaction is busy") end
+	local token = {}
+	activeToken = token
+	return token
+end
+
+local function leave(token)
+	if activeToken == token then activeToken = nil end
+end
+
+local function finite(value)
+	return type(value) == "number" and value == value and value < math.huge and value > -math.huge
+end
+
+local function arrayCount(value, label)
+	if type(value) ~= "table" then error(label .. " must be an array") end
+	local count = #value
+	for key in pairs(value) do
+		if type(key) ~= "number" or key < 1 or key ~= math.floor(key) or key > count then
+			error(label .. " must be a dense array")
+		end
+	end
+	return count
+end
+
+local function vector(value, label, positive)
+	if arrayCount(value, label) ~= 3 then error(label .. " must be [x,y,z]") end
+	for i = 1, 3 do
+		if not finite(value[i]) or (positive and value[i] <= 0) then
+			error(label .. " must contain finite " .. (positive and "positive " or "") .. "numbers")
+		end
+	end
+end
+
+local function validateBuildSpec(spec, index)
+	if type(spec) ~= "table" then error("stage commit op " .. index .. ": build args must be an object") end
+	if not BUILD_KINDS[spec.kind] then error("stage commit op " .. index .. ": unknown build kind: " .. tostring(spec.kind)) end
+	vector(spec.center, "stage commit op " .. index .. " center")
+	if spec.kind ~= "prop" then
+		vector(spec.size, "stage commit op " .. index .. " size", true)
+	elseif spec.parts ~= nil then
+		arrayCount(spec.parts, "stage commit op " .. index .. ": prop parts")
+		for partIndex, part in ipairs(spec.parts) do
+			if type(part) ~= "table" then error("stage commit op " .. index .. " part " .. partIndex .. " must be an object") end
+			vector(part.size, "stage commit op " .. index .. " part " .. partIndex .. " size", true)
+			if part.pos ~= nil then vector(part.pos, "stage commit op " .. index .. " part " .. partIndex .. " pos") end
+		end
+	end
+	if spec.parent ~= nil and type(spec.parent) ~= "string" then error("stage commit op " .. index .. ": parent must be a string") end
+	if spec.name ~= nil and type(spec.name) ~= "string" then error("stage commit op " .. index .. ": name must be a string") end
+end
+
+local function validateRequest(args)
+	if type(args) ~= "table" then error("stage commit request must be an object") end
+	if args.mode ~= "append" and args.mode ~= "update-existing" then
+		error("stage commit mode must be 'append' or 'update-existing'")
+	end
+	if type(args.buildId) ~= "string" or #args.buildId < 1 or #args.buildId > 64
+		or not string.match(args.buildId, "^[A-Za-z0-9][A-Za-z0-9_-]*$") then
+		error("stage commit buildId must be 1-64 letters, numbers, underscores, or hyphens")
+	end
+	if args.rootName ~= nil then
+		if type(args.rootName) ~= "string" or #args.rootName < 1 or #args.rootName > 100
+			or string.find(args.rootName, "[%c]") then
+			error("stage commit rootName must be 1-100 printable characters")
+		end
+	end
+	if arrayCount(args.ops, "stage commit ops") == 0 then error("stage commit needs a non-empty ops array") end
+	local items = #args.ops
+	for index, op in ipairs(args.ops) do
+		if type(op) ~= "table" or op.action ~= "build" then
+			error("stage commit op " .. index .. ": only build operations are supported")
+		end
+		validateBuildSpec(op.args, index)
+		if type(op.args.parts) == "table" then items = items + #op.args.parts end
+		if items > MAX_STAGE_ITEMS then error("stage commit exceeds the " .. MAX_STAGE_ITEMS .. "-item cap") end
+	end
+	return args
+end
+
+
+local function withBuildParent(parent, token, fn)
+	if Detail._buildParent ~= nil then error("private Stage commit build context is already active") end
+	if token == nil then error("private Stage commit build context has no transaction token") end
+	if activeToken ~= token then error("private Stage commit transaction token is not active") end
+	local previous = Detail._buildParent
+	local previousCreated = Detail._buildCreated
+	local previousThread = Detail._buildThread
+	local created = {}
+	Detail._buildParent = parent
+	Detail._buildCreated = created
+	Detail._buildThread = coroutine.running()
+	local ok, result = pcall(fn)
+	Detail._buildParent = previous
+	Detail._buildCreated = previousCreated
+	Detail._buildThread = previousThread
+	if not ok then error(result) end
+	return result, created
+end
+
+local function markOwned(instance, buildId)
+	instance:SetAttribute("BuildKitBuildId", buildId)
+	instance:SetAttribute("BuildKitOwned", true)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("BuildKitBuildId", buildId)
+		descendant:SetAttribute("BuildKitOwned", true)
+	end
+end
+
+local function findRoot(buildId)
+	local found = nil
+	for _, child in ipairs(workspace:GetChildren()) do
+		if child:GetAttribute("BuildKitBuildId") == buildId then
+			if not child:IsA("Model") or child:GetAttribute("BuildKitBuildRoot") ~= true then
+				error("stage commit buildId is attached to a non-managed root: " .. buildId)
+			end
+			if found then error("stage commit buildId has multiple managed roots: " .. buildId) end
+			found = child
+		end
+	end
+	return found
+end
+
+local function ensureNameAvailable(name, existing)
+	for _, child in ipairs(workspace:GetChildren()) do
+		if child ~= existing and child.Name == name then
+			error("stage commit root name is already used by another object: " .. name)
+		end
+	end
+end
+
+local function assertOwnedSubtree(instance, buildId)
+	if instance:GetAttribute("BuildKitBuildId") ~= buildId or instance:GetAttribute("BuildKitOwned") ~= true then
+		error("stage commit found an unowned child with buildId: " .. buildId)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:GetAttribute("BuildKitBuildId") ~= buildId or descendant:GetAttribute("BuildKitOwned") ~= true then
+			error("stage commit refuses a mixed owned/unowned subtree for buildId: " .. buildId)
+		end
+	end
+end
+
+local function collectOwned(root, buildId)
+	local owned = {}
+	for _, child in ipairs(root:GetChildren()) do
+		if child:GetAttribute("BuildKitBuildId") == buildId then
+			assertOwnedSubtree(child, buildId)
+			table.insert(owned, child)
+		else
+			for _, descendant in ipairs(child:GetDescendants()) do
+				if descendant:GetAttribute("BuildKitBuildId") == buildId then
+					error("stage commit found buildId nested under an unrelated child: " .. buildId)
+				end
+			end
+		end
+	end
+	return owned
+end
+
+local function sameInstances(a, b)
+	if #a ~= #b then return false end
+	local seen = {}
+	for _, instance in ipairs(a) do seen[instance] = true end
+	for _, instance in ipairs(b) do
+		if not seen[instance] then return false end
+	end
+	return true
+end
+
+local function buildCandidate(request, buildOne, token)
+	local candidate = Instance.new("Model")
+	candidate.Name = "__BuildKitStageCandidate_" .. request.buildId
+	local results = {}
+	local ok, failure = pcall(function()
+		for index, op in ipairs(request.ops) do
+			local result, created = withBuildParent(candidate, token, function()
+				return buildOne(op.args, token)
+			end)
+			if #created ~= 1 then error("stage commit op " .. index .. " did not create exactly one build root") end
+			local model = created[1]
+			if not model:IsDescendantOf(candidate) then error("stage commit op " .. index .. " escaped its private candidate") end
+			results[index] = result
+			markOwned(model, request.buildId)
+		end
+	end)
+	if not ok then
+		candidate:Destroy()
+		error(failure)
+	end
+	return candidate, results
+end
+
+local function rollback(root, rootCreated, candidate, backup, moved, added)
+	for index = #added, 1, -1 do
+		local child = added[index]
+		if child.Parent == root then child.Parent = candidate end
+	end
+	for index = #moved, 1, -1 do
+		local child = moved[index]
+		if child.Parent == backup then child.Parent = root end
+	end
+	if rootCreated and root then
+		root.Parent = nil
+		root:Destroy()
+	end
+	if candidate then candidate:Destroy() end
+	if backup then backup:Destroy() end
+end
+
+local function revalidateTarget(existing, request, initialName, initialOwned, rootName)
+	local current = findRoot(request.buildId)
+	if current ~= existing then error("stage commit target changed while building; retry the same buildId") end
+	if existing then
+		if existing.Parent ~= workspace then error("stage commit target is no longer a direct Workspace root") end
+		if existing.Name ~= initialName then error("stage commit target name changed while building; retry") end
+		if request.rootName and request.rootName ~= existing.Name then error("stage commit rootName does not match the existing buildId root") end
+		local currentOwned = collectOwned(existing, request.buildId)
+		if not sameInstances(initialOwned, currentOwned) then
+			error("stage commit target children changed while building; retry the same buildId")
+		end
+		return currentOwned
+	end
+	ensureNameAvailable(rootName, nil)
+	return {}
+end
+
+local function apply(request, buildOne, token)
+	local existing = findRoot(request.buildId)
+	if request.mode == "append" and existing then
+		error("stage commit buildId already exists; use update-existing: " .. request.buildId)
+	end
+	if existing and request.rootName and request.rootName ~= existing.Name then
+		error("stage commit rootName does not match the existing buildId root")
+	end
+
+	local initialName = existing and existing.Name or nil
+	local initialOwned = existing and collectOwned(existing, request.buildId) or {}
+	local rootName = request.rootName or ("BuildKit_" .. request.buildId)
+	if not existing then ensureNameAvailable(rootName, nil) end
+
+	local candidate, results = buildCandidate(request, buildOne, token)
+	local revalidateOk, oldOwnedOrFailure = pcall(function()
+		return revalidateTarget(existing, request, initialName, initialOwned, rootName)
+	end)
+	if not revalidateOk then
+		local cleanupOk, cleanupFailure = pcall(function() candidate:Destroy() end)
+		if not cleanupOk then error(tostring(oldOwnedOrFailure) .. " (candidate cleanup failed: " .. tostring(cleanupFailure) .. ")") end
+		error(oldOwnedOrFailure)
+	end
+	local oldOwned = oldOwnedOrFailure
+	local root = existing
+	local rootCreated = false
+	local backup = nil
+	local moved, added = {}, {}
+	local swapOk, swapFailure = pcall(function()
+		if not root then
+			ensureNameAvailable(rootName, nil)
+			root = Instance.new("Model")
+			rootCreated = true
+			root.Name = rootName
+			root:SetAttribute("BuildKitBuildId", request.buildId)
+			root:SetAttribute("BuildKitBuildRoot", true)
+			root:SetAttribute("BuildKitManaged", true)
+		end
+		backup = Instance.new("Folder")
+		if rootCreated then
+			root.Parent = workspace
+		else
+			for _, child in ipairs(oldOwned) do
+				child.Parent = backup
+				table.insert(moved, child)
+			end
+		end
+		for _, child in ipairs(candidate:GetChildren()) do
+			child.Parent = root
+			table.insert(added, child)
+		end
+	end)
+	if not swapOk then
+		local rollbackOk, rollbackFailure = pcall(function()
+			rollback(root, rootCreated, candidate, backup, moved, added)
+		end)
+		if not rollbackOk then error(tostring(swapFailure) .. " (stage commit rollback failed: " .. tostring(rollbackFailure) .. ")") end
+		error(swapFailure)
+	end
+
+	-- The reversible swap is complete. Destruction is deliberately outside that
+	-- boundary: if Studio ever reports a cleanup error after one old child is
+	-- destroyed, restoring the old subtree would be false and unsafe.
+	local warnings = {}
+	local backupOk, backupFailure = pcall(function() backup:Destroy() end)
+	if not backupOk then
+		table.insert(warnings, "old BuildKit geometry cleanup failed: " .. tostring(backupFailure))
+		local recoveryName = "__BuildKitStageRecovery_" .. request.buildId
+		local keepOk = pcall(function()
+			ensureNameAvailable(recoveryName, nil)
+			backup.Name = recoveryName
+			backup.Parent = workspace
+		end)
+		if not keepOk then table.insert(warnings, "old geometry was retained in an unparented recovery buffer") end
+	end
+	local candidateOk, candidateFailure = pcall(function() candidate:Destroy() end)
+	if not candidateOk then table.insert(warnings, "private candidate cleanup failed: " .. tostring(candidateFailure)) end
+	return {
+		mode = request.mode,
+		buildId = request.buildId,
+		root = { name = root.Name, path = root:GetFullName(), created = rootCreated, updated = not rootCreated },
+		count = #request.ops,
+		results = results,
+		warnings = #warnings > 0 and warnings or nil,
+	}
+end
+
+local function commit(args, buildOne)
+	local request = validateRequest(args)
+	if type(buildOne) ~= "function" then error("stage commit build callback is unavailable") end
+	local token = enter()
+	local ok, result = pcall(function()
+		return recorded("BuildKit stage commit " .. request.buildId, function()
+			return apply(request, buildOne, token)
+		end)
+	end)
+	leave(token)
+	if not ok then error(result) end
+	return result
+end
+
+--#region exports (generated — do not hand-edit)
+return { commit = commit, enter = enter, leave = leave }
+--#endregion
+]]></ProtectedString>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript" referent="RBX15">
+				<Properties>
 					<string name="Name">Poll</string>
 					<ProtectedString name="Source"><![CDATA[--!nocheck
 --#region imports (generated — do not hand-edit)
@@ -7289,7 +7962,8 @@ end
 -- Keep the live-sync contract at the plugin boundary too. Node validates the same
 -- shape, but the bridge is a local trust boundary and callers can still send commands
 -- directly. A missing scoped target is an empty scene, not a stale mirror.
-local MAX_SYNC_PARTS = 800
+local DEFAULT_SYNC_PARTS = 800
+local MAX_SYNC_PARTS = 20000
 local function finiteNumber(value)
 	return type(value) == "number" and value == value and value < math.huge and value > -math.huge
 end
@@ -7353,7 +8027,7 @@ local liveSyncScope = normalizeScope({
 	target = (type(savedTarget) == "string" and savedTarget ~= "") and savedTarget or "workspace",
 	lod = savedLod == "bbox" and "bbox" or "parts",
 	maxParts = savedMaxParts,
-}, { target = "workspace", lod = "parts", maxParts = MAX_SYNC_PARTS })
+}, { target = "workspace", lod = "parts", maxParts = DEFAULT_SYNC_PARTS })
 
 local function emptyDump(scope, coverage)
 	return {
@@ -7440,7 +8114,7 @@ local function bboxDump(inst, scope)
 end
 
 local function scopedSceneDump(args, allowMissing)
-	local scope = normalizeScope(args or {}, { target = "workspace", lod = "parts", maxParts = MAX_SYNC_PARTS })
+	local scope = normalizeScope(args or {}, { target = "workspace", lod = "parts", maxParts = DEFAULT_SYNC_PARTS })
 	local inst
 	if args and (args.selection == true or args.target == "selection") then
 		local selected = game:GetService("Selection"):Get()
@@ -7458,7 +8132,7 @@ local function scopedSceneDump(args, allowMissing)
 	local dump = sceneDump(inst, scope.maxParts, scope.region and function(part)
 		local position = part.Position
 		return inRegion({ position.X, position.Y, position.Z }, scope.region)
-	end or nil)
+	end or nil, args ~= nil and args.precise == true)
 	if scope.region then
 		-- The hierarchy was built before the region filter; omit it rather than expose
 		-- a tree that contains nodes outside the requested scope.
@@ -7488,8 +8162,15 @@ local liveSyncEnabled = plugin:GetSetting("bk_liveSync") ~= false
 local liveSyncIntervalMs = clampLiveSyncInterval(plugin:GetSetting("bk_liveSyncIntervalMs"))
 local mirrorJson = nil
 
+local function liveSyncStatus()
+	local result = { enabled = liveSyncEnabled, intervalMs = liveSyncIntervalMs, lod = liveSyncScope.lod, maxParts = liveSyncScope.maxParts }
+	if liveSyncScope.target then result.target = liveSyncScope.target else result.region = liveSyncScope.region end
+	return result
+end
+
 local function configureLiveSync(args)
 	args = args or {}
+	if args.readOnly == true then return liveSyncStatus() end
 	if args.enabled ~= nil then liveSyncEnabled = args.enabled == true end
 	if args.intervalMs ~= nil then liveSyncIntervalMs = clampLiveSyncInterval(args.intervalMs) end
 	if args.target ~= nil or args.region ~= nil or args.lod ~= nil or args.maxParts ~= nil then
@@ -7502,9 +8183,7 @@ local function configureLiveSync(args)
 	plugin:SetSetting("bk_liveSyncIntervalMs", liveSyncIntervalMs)
 	-- Re-enable/reconfigure sends a fresh snapshot, including after a bridge restart.
 	mirrorJson = nil
-	local result = { enabled = liveSyncEnabled, intervalMs = liveSyncIntervalMs, lod = liveSyncScope.lod, maxParts = liveSyncScope.maxParts }
-	if liveSyncScope.target then result.target = liveSyncScope.target else result.region = liveSyncScope.region end
-	return result
+	return liveSyncStatus()
 end
 
 -- rbx_live_sync_start/stop use the normal command path to control this plugin-side loop.
@@ -7642,7 +8321,7 @@ return { post = post, configureLiveSync = configureLiveSync, CONFIG_DEFAULTS = C
 ]]></ProtectedString>
 				</Properties>
 			</Item>
-			<Item class="ModuleScript" referent="RBX15">
+			<Item class="ModuleScript" referent="RBX16">
 				<Properties>
 					<string name="Name">Toolbar</string>
 					<ProtectedString name="Source"><![CDATA[--!nocheck
@@ -7683,7 +8362,7 @@ return { toolbar = toolbar }
 ]]></ProtectedString>
 				</Properties>
 			</Item>
-			<Item class="ModuleScript" referent="RBX16">
+			<Item class="ModuleScript" referent="RBX17">
 				<Properties>
 					<string name="Name">Settings</string>
 					<ProtectedString name="Source"><![CDATA[--!nocheck
@@ -7816,7 +8495,7 @@ return {}
 ]]></ProtectedString>
 				</Properties>
 			</Item>
-			<Item class="ModuleScript" referent="RBX17">
+			<Item class="ModuleScript" referent="RBX18">
 				<Properties>
 					<string name="Name">MeshCutter</string>
 					<ProtectedString name="Source"><![CDATA[--!nocheck

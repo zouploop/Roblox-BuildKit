@@ -9,7 +9,8 @@ export type SyncScope = {
   maxParts: number;
 };
 
-export const MAX_SYNC_PARTS = 800;
+export const DEFAULT_SYNC_PARTS = 800;
+export const MAX_SYNC_PARTS = 20_000;
 
 function vec3(value: unknown, label: string): Vec3 {
   if (!Array.isArray(value) || value.length !== 3 || value.some((n) => typeof n !== "number" || !Number.isFinite(n))) {
@@ -52,7 +53,7 @@ export function normalizeSyncScope(input: unknown = {}): SyncScope {
 
   const lod = value.lod === undefined ? "parts" : value.lod;
   if (lod !== "parts" && lod !== "bbox") throw new Error("sync lod must be parts or bbox");
-  const requested = value.maxParts === undefined ? MAX_SYNC_PARTS : value.maxParts;
+  const requested = value.maxParts === undefined ? DEFAULT_SYNC_PARTS : value.maxParts;
   if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) throw new Error("sync maxParts must be a positive integer");
   return { ...(target ? { target } : { region }), lod, maxParts: Math.min(requested, MAX_SYNC_PARTS) };
 }

@@ -89,7 +89,9 @@ the last successful sync time and a prominent link for switching between **Stage
 Stage is the editable construction bench. Every `generators/*.js` file exports a
 synchronous `generate(args)` function that returns validated build operations. The server
 watches those files, keeps the last good result after a bad edit, and broadcasts updates
-to the page.
+to the page. Generator visibility overrides are persisted per Stage session in the
+user-local `BUILDKIT_CONFIG_DIR`; new generator files default enabled, and clearing Stage
+removes manual ops while keeping enabled generator source outputs live.
 
 #### Camera and selection
 
@@ -139,7 +141,9 @@ Mirror; editing shortcuts are Stage-only because Mirror is read-only.
 - **Lock** prevents accidental editing of the selection. **Delete** removes the complete
   selection. **Ctrl+C**, **Ctrl+V**, and **Ctrl+D** copy, paste, and duplicate.
 - Generator-owned objects regenerate from their source file and cannot be edited directly.
-  Select one and click **Detach** to turn that generator output into manual Stage objects.
+  Select one or more and click **Detach** to turn those generator outputs into manual Stage
+  objects in one undoable action; the HTTP route accepts the compatible `{name}` or normalized
+  `{names}` form and rejects the whole selection if any owner is unavailable.
 - **Ctrl+Z** undoes; **Ctrl+Y** or **Ctrl+Shift+Z** redoes. The History panel shows the
   action queue, and clicking an older entry restores that Stage state.
 
@@ -153,6 +157,9 @@ Library panel and can be enabled or disabled there.
   `.bkasset.json`; **Export** downloads a preset for another user.
 - **AI Library** contains agent-saved presets and generator entries. Clicking **Add** places
   the complete preset at the center of the current renderer view and selects it.
+- Presets may carry named assembly sockets (`name`, local `pos`, and XYZ `rot`). Socket metadata
+  round-trips through save/import/export; omitted sockets preserve an existing preset and `[]`
+  clears them. `rbx_socket_align` is a read-only transform/residual calculator.
 - **Recent** saves or restores complete Stage snapshots and can export a `.bkstage` file.
 - **Build** replays the construction order without changing Stage. Use the slider to scrub
   through the build, or enable **auto** to replay after Stage changes.
@@ -177,6 +184,28 @@ Stage. Comparison reports partial coverage for old plugins, truncated reads, and
 surfaces; it does not certify materials or rendered CSG fidelity. Automatic Studio build QA
 is report-only; Studio-side repairs require an explicit `rbx_qa` call with `fix:true`.
 
+`rbx_stage_status` returns the current `instance` epoch and revision. `rbx_stage_inspect` returns
+stable operation/part IDs in bounded pages (`offset`/`limit`), or a change-aware delta with
+`sinceRevision` and the matching `instanceEpoch`; an optional focused render is marked stale if
+the Stage changes while it is awaited. `rbx_stage_patch` accepts only stable IDs plus field
+changes, validates the whole batch before mutation, records one undo entry, and returns compact
+changed-ID metadata by default. A copied preset whose IDs collide is remapped at the append
+boundary, including its authored connection endpoints; ambiguous edit references fail closed.
+
+`rbx_stage_connect` accepts only `intent` (`seat`, `join`, or `align`), stable `source`/`target`
+part IDs, and revision/tolerance inputs. Preview is read-only. Apply recomputes from the current
+server Stage and revision, rather than trusting a submitted plan or action list, and returns a
+numeric residual plus one undoable Stage edit.
+
+`rbx_stage_verify` is the compact read-only bundle for a final check. It combines current
+Stage/generator errors with seam findings and coverage, so warnings, unsupported surfaces,
+truncated results, or revision drift never produce `clean:true`; `noBlockingErrors` is exposed
+separately. Set `details:true` for bounded issue data, `render:{...}` for an optional focused
+Stage image, or `target:"Workspace.Model"` for read-only primitive Studio parity. Render and
+readback results are bound to the observed Stage revision and are marked stale if it changes.
+This tool never commits or edits Studio, and visual pixels, materials, lighting, CSG fidelity,
+meshes, and undeclared openings remain explicitly uncertified.
+
 Optional prop `connections` declare `touch`, `supportedBy`, `continuousSurface`, or
 `clearance` rules. Each rule has an `id`, `a`/`b` endpoints (`part`: stable ID or unique
 local name; `point`: part-local XYZ), and optional `tolerance` or clearance `min`/`max`.
@@ -198,7 +227,7 @@ visibility, and **Force sync**. Force sync reloads the latest accepted Stage sta
 library data; it refuses to overwrite a newer transform that is still being applied.
 
 Headless prop workers use separate Stage sessions (maximum six) through
-`rbx_stage_build`, `rbx_stage_status`, `rbx_stage_render`, and `rbx_stage_clear`, then save
+`rbx_stage_build`, `rbx_stage_status`, `rbx_stage_inspect`, `rbx_stage_render`, and `rbx_stage_clear`, then save
 winners with `rbx_library_save`. Those sessions do not touch Studio until explicitly
 committed.
 
@@ -215,7 +244,11 @@ selection at the center of Stage. In **Options → Map ground**, **Use selected*
 selection as the ground target for map placement; **Clear** removes it. Plugin-side live
 sync starts enabled at a 1500 ms interval; the plugin Settings panel and
 `rbx_live_sync_start(intervalMs)` accept 100–60000 ms. Deleted Studio instances disappear
-on the next changed snapshot. Use **Options → Force sync** to request an immediate refresh.
+on the next changed snapshot. Mirror **Options** also exposes the authoritative maximum parts
+limit (1–20000); higher limits may reduce responsiveness. Changes are saved in Studio plugin settings and
+take effect on the next normal Mirror sync. If an options request reports a stale plugin,
+restart Studio. When autosync is paused, changing the limit refreshes only the current snapshot.
+Use **Options → Force sync** to request an immediate refresh.
 
 ## Main tools
 
@@ -268,8 +301,11 @@ those tools. The fallback uses the plugin's
 Studio client area only when the crop cannot be resolved.
 
 `rbx_library_save`, `rbx_library_list`, and `rbx_stage_commit` now return compact metadata
-or QA summaries by default. Use `detail:true` for full output, and `file:"Preset.json"`
-on library list to fetch only one preset's geometry.
+or QA summaries by default. Stage MCP commits require explicit `mode` (`append` or
+`update-existing`) and stable `buildId`; the legacy HTTP viewer commit defaults to an
+idempotent `update-existing` root per Stage session when those fields are omitted. Use
+`detail:true` for full output, and `file:"Preset.json"` on library list to fetch only one
+preset's geometry.
 
 To keep agent context small: use `rbx_stage_status` summaries before requesting images;
 use limited `rbx_stage_qa` results for measurements; inspect only changed regions during

@@ -21,6 +21,7 @@ const MODULES = [
 	["80-builders.luau", "Builders"],
 	["90-gui.luau", "Gui"],
 	["100-handlers.luau", "Handlers"],
+	["105-stage-commit.luau", "StageCommit"],
 	["110-poll.luau", "Poll"],
 	["120-toolbar.luau", "Toolbar"],
 	["130-settings.luau", "Settings"],
@@ -31,7 +32,7 @@ const HANDLERS = `align annotate apply attr batch build build_gui cast checkpoin
 contrast cutaway describe diff distribute edit find frame frame_coords frame_dir frame_dir_coords
 ground group gui_preview insert insertAsset insertChest inspect isolate map measure navcheck
 optimize ping prop qa replace restore restore_all restore_camera runtime_install runtime_remove
-place map_apply save_camera scatter scene_dump script selection set_lighting sound sync tag terrain undo view`.split(/\s+/).sort();
+ place map_apply save_camera scatter scene_dump script selection set_lighting sound stage_commit sync tag terrain undo view`.split(/\s+/).sort();
 
 // These are the file edges measured in the approved plan. Keeping the list here
 // makes the baseline graph a regression oracle without pretending this is a parser.
@@ -53,6 +54,10 @@ const EDGES = [
 	["140-mesh-cutter.luau", "30-parametric.luau", "watchBuildKit scanBuildKit"],
 	["130-settings.luau", "110-poll.luau", "post CONFIG_DEFAULTS"],
 	["100-handlers.luau", "40-quality.luau", "prepSpec applyQuality"],
+	["100-handlers.luau", "105-stage-commit.luau", "StageCommit"],
+	["105-stage-commit.luau", "00-header.luau", "recorded"],
+	["105-stage-commit.luau", "20-detail.luau", "_buildParent _buildCreated _buildThread"],
+	["80-builders.luau", "105-stage-commit.luau", "enter leave"],
 	["20-detail.luau", "10-geometry.luau", "makeBox"],
 	["40-quality.luau", "10-geometry.luau", "makeBox"],
 	["30-parametric.luau", "00-header.luau", "HttpService"],
@@ -308,13 +313,13 @@ function checkArtifact(records, errors) {
 	const folderStarts = [...root.matchAll(/<Item\s+class="Folder"\s+referent="([^"]+)">/g)];
 	if (rootMatches.length !== 1 || (xml.match(/<Item\s+class="Script"/g) ?? []).length !== 1 || folderStarts.length !== 1 ||
 		!root.includes('<string name="Name">BuildKitPlugin</string>') || !root.includes('<string name="Name">Modules</string>')) {
-		errors.push(`G3 invalid rbxmx tree: expected Script + Modules + 16 ModuleScripts`);
+		errors.push(`G3 invalid rbxmx tree: expected Script + Modules + ${MODULES.length} ModuleScripts`);
 	}
 	if (new Set(referents).size !== referents.length) errors.push("G3 duplicate rbxmx referent");
 	const folderIndex = folderStarts.length ? root.indexOf(folderStarts[0][0]) : -1;
 	const folder = folderIndex >= 0 ? root.slice(folderIndex) : "";
 	const moduleItems = [...folder.matchAll(/<Item\s+class="ModuleScript"\s+referent="([^"]+)">([\s\S]*?)<\/Item>/g)];
-	if (moduleItems.length !== 16) errors.push(`G3 expected 16 ModuleScript items, got ${moduleItems.length}`);
+	if (moduleItems.length !== MODULES.length) errors.push(`G3 expected ${MODULES.length} ModuleScript items, got ${moduleItems.length}`);
 	if (moduleItems.some(([, , body]) => body.includes('name="RunContext"'))) errors.push("G3 ModuleScript has RunContext");
 	const expected = new Set(MODULES.map(([, name]) => name));
 	const names = moduleItems.map(([, , body]) => body.match(/<string\s+name="Name">([^<]*)<\/string>/)?.[1] ?? "");
